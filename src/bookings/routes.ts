@@ -94,13 +94,19 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
     // Layer 1: one request per room reaches the database at a time; the rest are turned away
     // here without opening a transaction. This sheds load. It does not guarantee correctness.
     let lock: Lock | null = null;
-    let lockAvailable = true;
-    try {
-      lock = await acquireLock(app.redis, roomLockKey(body.roomId), ROOM_LOCK_TTL_MS);
-    } catch (error) {
-      // Redis is unreachable: keep taking bookings, relying on the exclusion constraint alone.
-      lockAvailable = false;
-      request.log.warn(error, 'room lock unavailable, relying on database constraint');
+    // Redis is unreachable: keep taking bookings, relying on the exclusion constraint alone.
+    // The status is checked first because a command sent while ioredis is reconnecting waits
+    // for several retries (seconds) before it fails, and every booking would wait with it.
+    let lockAvailable = app.redis.status === 'ready';
+    if (lockAvailable) {
+      try {
+        lock = await acquireLock(app.redis, roomLockKey(body.roomId), ROOM_LOCK_TTL_MS);
+      } catch (error) {
+        lockAvailable = false;
+        request.log.warn(error, 'room lock failed, relying on database constraint');
+      }
+    } else {
+      request.log.warn('room lock skipped: redis not ready, relying on database constraint');
     }
     if (lockAvailable && lock === null) {
       reply.header('Retry-After', '1');

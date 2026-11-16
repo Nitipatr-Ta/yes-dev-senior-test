@@ -325,6 +325,60 @@ describe('booking API', () => {
     expect(cancel.json().booking.status).toBe('cancelled');
   });
 
+  it('returns 404 when cancelling or reading a booking that does not exist', async () => {
+    const read = await app.inject({ method: 'GET', url: '/bookings/999999999999', headers: alice.headers });
+    const cancel = await app.inject({
+      method: 'POST',
+      url: '/bookings/999999999999/cancel',
+      headers: alice.headers,
+    });
+
+    expect(read.statusCode).toBe(404);
+    expect(cancel.statusCode).toBe(404);
+    expect(cancel.json().error.code).toBe('BOOKING_NOT_FOUND');
+  });
+
+  it('cancels once when the same booking is cancelled many times at once', async () => {
+    const bookingId = (await book(alice, day(10), day(13))).json().booking.id;
+
+    const responses = await Promise.all(
+      Array.from({ length: 30 }, () =>
+        app.inject({ method: 'POST', url: `/bookings/${bookingId}/cancel`, headers: alice.headers }),
+      ),
+    );
+
+    expect(responses.map((r) => r.statusCode)).toEqual(Array(30).fill(200));
+    expect(responses.every((r) => r.json().booking.status === 'cancelled')).toBe(true);
+    expect(await confirmedCount()).toBe(0);
+    expect((await book(bob, day(10), day(13))).statusCode).toBe(201);
+  });
+
+  it('rejects a valid token whose user has been deleted, without creating a booking', async () => {
+    const ghost = { authorization: `Bearer ${app.jwt.sign({ sub: '999999999999', role: 'user' })}` };
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/bookings',
+      headers: ghost,
+      payload: { roomId, checkIn: day(10), checkOut: day(12) },
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json().error.code).toBe('UNAUTHORIZED');
+    expect(await confirmedCount()).toBe(0);
+    expect(await app.redis.exists(roomLockKey(roomId))).toBe(0);
+  });
+
+  it('books normally after the room lock of a crashed request expires', async () => {
+    // A request that died while holding the lock leaves the key behind until its TTL.
+    await app.redis.set(roomLockKey(roomId), 'token-of-a-dead-request', 'PX', 150);
+    expect((await book(alice, day(10), day(12))).json().error.code).toBe('ROOM_BUSY');
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    expect((await book(alice, day(10), day(12))).statusCode).toBe(201);
+  });
+
   it('lists and reads the caller own bookings', async () => {
     const created = (await book(alice, day(10), day(13))).json().booking;
 

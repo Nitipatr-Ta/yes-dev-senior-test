@@ -283,6 +283,18 @@ describe('booking dashboard', () => {
       expect(inbox.peek(ours)).toEqual([]);
     });
 
+    it('sends exactly one event when the same booking is cancelled many times at once', async () => {
+      const { inbox } = await connectAdmin();
+      const booking = (await book(day(35), day(36))).json().booking;
+      await inbox.take(eventFor('booking.created', booking.id));
+
+      await Promise.all(Array.from({ length: 30 }, () => cancel(booking.id)));
+      await inbox.take(eventFor('booking.cancelled', booking.id));
+      await pause(200);
+
+      expect(inbox.peek(ours)).toEqual([]);
+    });
+
     it('delivers events from another API instance through Redis Pub/Sub', async () => {
       const other = await buildTestApp({ now: () => MORNING });
       try {
@@ -331,6 +343,27 @@ describe('booking dashboard', () => {
 
       ws.send(JSON.stringify({ type: 'auth', token: adminToken }));
       expect((await inbox.take((m) => m.type === 'error')).error.code).toBe('ALREADY_AUTHENTICATED');
+    });
+
+    it('rejects unknown message types and binary frames without closing the socket', async () => {
+      const { ws, inbox } = await connectAdmin();
+
+      ws.send(JSON.stringify({ type: 'subscribe', channel: 'everything' }));
+      expect((await inbox.take((m) => m.type === 'error')).error.code).toBe('INVALID_MESSAGE');
+      ws.send(Buffer.from(JSON.stringify({ type: 'snapshot' })), { binary: true });
+      expect((await inbox.take((m) => m.type === 'error')).error.code).toBe('INVALID_MESSAGE');
+
+      ws.send(JSON.stringify({ type: 'snapshot' }));
+      expect((await inbox.take((m) => m.type === 'snapshot')).data).toBeDefined();
+    });
+
+    it('closes the socket when a client sends a message over the size limit', async () => {
+      const { ws, inbox } = await connectAdmin();
+
+      ws.send(JSON.stringify({ type: 'snapshot', padding: 'x'.repeat(9_000) }));
+
+      // 1009: message too big.
+      expect((await inbox.closed).code).toBe(1009);
     });
   });
 });

@@ -44,6 +44,23 @@ npm install
 DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_URL=redis://localhost:6379 npm test
 ```
 
+มี 166 เทสต์ใน 10 ไฟล์ ใช้เวลาประมาณ 3 วินาที
+
+| ไฟล์ | ครอบคลุม |
+|---|---|
+| `test/concurrency.test.ts` | การจองพร้อมกันผ่าน HTTP จริง (ดูหัวข้อ Concurrency test) |
+| `test/bookings.test.ts` | API การจอง การตรวจ input ช่วงวันทับกัน room lock และการยกเลิก |
+| `test/pricing.test.ts` | ตัวคำนวณราคาทุกกฎ ขอบเวลา การปัดเศษ และราคาที่บันทึกกับการจอง |
+| `test/dashboard.test.ts` | WebSocket: การยืนยันตัวตน event และ Redis Pub/Sub ข้าม instance |
+| `test/hub.test.ts` | ตัวกระจายข้อความของ dashboard: คิวก่อน snapshot การตัด client ที่ช้าหรือไม่ตอบ ping |
+| `test/rate-limit.test.ts` | ตัวนับและกฎ rate limit ทุกข้อ |
+| `test/auth.test.ts` | สมัคร เข้าสู่ระบบ token และสิทธิ์ admin |
+| `test/db.test.ts` | Migration, constraint ของ schema และ transaction |
+| `test/config.test.ts` | การตรวจตัวแปร environment |
+| `test/health.test.ts` | Health check |
+
+เทสต์สร้างประเภทห้อง ห้อง และผู้ใช้ของตัวเองแล้วลบเมื่อจบ จึงไม่แตะข้อมูลที่ seed ไว้ เทสต์ที่จำลอง Redis ล่มชี้ไปที่พอร์ต 6399 ซึ่งต้องไม่มีอะไรรันอยู่
+
 ## สถานะงาน
 
 | ส่วน | สถานะ |
@@ -55,7 +72,7 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 | API 2: Dynamic Pricing Engine | เสร็จ |
 | API 3: Booking Dashboard (WebSocket) | เสร็จ |
 | Redis rate limiting | เสร็จ |
-| Concurrency test | มีใน `test/bookings.test.ts` แล้ว ยังไม่มี load test แยก |
+| Concurrency test | เสร็จ |
 | Postman collection (`/postman`) | ยังไม่เริ่ม |
 
 ## แนวทางแก้ปัญหา
@@ -123,7 +140,7 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 
 กรณีที่ชั้นแรกใช้ไม่ได้
 
-- Redis ล่ม: API ยังรับจองต่อโดยอาศัย constraint อย่างเดียว และ log คำเตือน
+- Redis ล่ม: API ยังรับจองต่อโดยอาศัย constraint อย่างเดียว และ log คำเตือน โค้ดตรวจสถานะ connection ก่อนขอล็อก จึงข้ามไปใช้ฐานข้อมูลทันทีโดยไม่รอ Redis
 - ล็อกหมดอายุก่อนคำขอทำเสร็จ: คำขออื่นเข้ามาได้ แต่ constraint ยังกันการจองซ้อน
 
 ข้อแลกเปลี่ยน: ล็อกเป็นระดับห้อง สองคำขอที่จองห้องเดียวกันคนละช่วงวันในเวลาเดียวกัน อาจมีคำขอหนึ่งได้ `ROOM_BUSY` ทั้งที่วันไม่ทับกัน ผู้เรียกต้องลองใหม่
@@ -141,7 +158,22 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 
 ราคาคำนวณด้วย Dynamic Pricing Engine (API 2) ภายใน transaction เดียวกับ `INSERT` และบันทึกไว้กับการจอง
 
-เทสต์ใน `test/bookings.test.ts` ยิง 100 คำขอพร้อมกันในช่วงวันเดียวกันแล้วตรวจว่าสำเร็จ 1 รายการ ยิงคำขอที่ช่วงวันทับกันบางส่วนแล้วตรวจว่าไม่มีคู่ใดทับกันในฐานข้อมูล และยิง `INSERT` พร้อมกันโดยไม่ผ่านล็อกเพื่อยืนยันว่า constraint กันได้เอง
+### Concurrency test (ทำแล้ว)
+
+`test/concurrency.test.ts` เปิด server จริงบนพอร์ตสุ่ม แล้วยิงคำขอผ่าน TCP จากผู้ใช้ 25 คน โดยมีคำขอวิ่งพร้อมกัน 100 รายการ ทุกเทสต์ตรวจในฐานข้อมูลตอนท้ายว่าไม่มีการจองที่ยืนยันแล้วคู่ใดของห้องเดียวกันมีช่วงวันทับกัน
+
+| สถานการณ์ | ผลที่ตรวจ |
+|---|---|
+| 500 คำขอจองห้องเดียวกันช่วงวันเดียวกัน | สำเร็จ 1 รายการ ที่เหลือ 499 ได้ 409 |
+| 600 คำขอสุ่มช่วงวัน 1–4 คืนที่ทับกันบน 3 ห้อง | ไม่มีคู่ใดทับกัน และรายการที่ตอบ 201 ตรงกับที่บันทึกในฐานข้อมูลทุกรายการ |
+| 10 คืน คืนละ 20 client ที่ลองใหม่เมื่อได้ `ROOM_BUSY` | แต่ละคืนถูกจอง 1 ครั้งพอดี อีก 190 คำขอได้ `ROOM_UNAVAILABLE` |
+| 30 client จองแล้วยกเลิกช่วงวันเดียวกันสลับกัน 10 รอบ | ทุกการจองที่สำเร็จถูกยกเลิกครบ ไม่มีช่วงที่จองซ้อน |
+| 100 คำขอพร้อมกันขณะ Redis ต่อไม่ได้ | สำเร็จ 1 รายการ ที่เหลือได้ `ROOM_UNAVAILABLE` และเสร็จภายใน 3 วินาที |
+| 300 คำขอแย่งห้องหนึ่ง ระหว่างนั้นจองอีกห้องและเรียก `/health` | ห้องอื่นจองได้ และ `/health` ตอบ 200 |
+
+จำนวนคำขอพร้อมกันจำกัดที่ 100 เพราะการเปิด TCP connection หลายร้อยเส้นในเสี้ยววินาทีเดียวเกินคิวรับ connection ของเครื่องพัฒนา (`ECONNRESET` ตอน connect) ซึ่งเป็นขีดจำกัดของระบบปฏิบัติการ ไม่ใช่ของ API
+
+นอกจากนี้ `test/bookings.test.ts` ยิง `INSERT` พร้อมกันโดยไม่ผ่าน API เพื่อยืนยันว่า constraint กันได้เอง และ `test/pricing.test.ts` ตรวจว่าการจองสองห้องสุดท้ายพร้อมกันได้ราคาที่สอดคล้องกัน
 
 ### API 2: Dynamic Pricing Engine (ทำแล้ว)
 
@@ -266,6 +298,7 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 | API 2: Pricing | เขียน `src/pricing/*`, `src/bookings/schemas.ts`, `src/db/transaction.ts`, `test/pricing.test.ts` และปรับ `POST /bookings` ลง repo โดยตรง เลือกวิธีปัดเศษ การล็อกประเภทห้อง และนิยาม "การพักที่เสร็จแล้ว" | ตรวจโค้ดและ commit |
 | API 3: Dashboard | เขียน `src/dashboard/*`, `src/bookings/model.ts`, `test/dashboard.test.ts` และปรับ `POST /bookings` กับการยกเลิกให้ส่ง event ลง repo โดยตรง เลือกวิธียืนยันตัวตนของ WebSocket และเนื้อหา snapshot | ตรวจโค้ดและ commit แก้การ subscribe และเทสต์ token หมดอายุด้วยตัวเองตามผลตรวจ |
 | Rate limiting | เขียน `src/rate-limit/*`, `test/rate-limit.test.ts` และต่อเข้ากับ route ลง repo โดยตรง เลือกแบบ fixed window ค่าขีดจำกัด และให้ปล่อยผ่านเมื่อ Redis ล่ม | ตรวจโค้ดและ commit |
+| Concurrency test และเทสต์ที่เหลือ | เขียน `test/concurrency.test.ts`, `test/hub.test.ts`, `test/db.test.ts`, `test/config.test.ts` และเพิ่มกรณีใน `test/bookings.test.ts` กับ `test/dashboard.test.ts` ลง repo โดยตรง แก้ `POST /bookings` ให้ไม่รอ Redis ตอนล่ม | ตรวจโค้ดและ commit |
 | README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |
 
 ### สิ่งที่ AI ทำผิดและวิธีแก้
@@ -276,3 +309,24 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 - ผลที่เกิด: รัน stack ครั้งแรกโดยไม่มี `.env` แล้วสร้าง `.env` จาก `.env.example` ภายหลัง เมื่อ build ใหม่ API ส่งรหัสผ่านใหม่ไปยังฐานข้อมูลที่ยังใช้รหัสเดิม จึงเริ่มทำงานไม่ได้ด้วย error `28P01` (password authentication failed)
 - วิธีที่พบ: อ่าน log ของ container `api` แล้วเทียบเวลาที่สร้าง `.env` กับเวลาที่สร้าง volume
 - วิธีแก้: ลบ volume ด้วย `docker-compose down -v` แล้วรันใหม่ และเพิ่มขั้นตอนนี้ไว้ในหัวข้อวิธีติดตั้งและรัน
+
+**2. API start ไม่ขึ้นเมื่อ Redis ต่อไม่ได้**
+
+- สิ่งที่ AI ทำ: ในส่วน dashboard ใช้ `await subscriber.subscribe(...)` ระหว่างสร้าง app
+- ผลที่เกิด: ถ้า API restart ขณะ Redis ล่ม การสร้าง app ล้มใน 0.8 วินาที ขัดกับที่ออกแบบไว้ว่า Redis ล่มแล้ว API ยังทำงานต่อ
+- วิธีที่พบ: ให้ AI อีกรุ่นตรวจ commit แล้วทดลองสร้าง app โดยชี้ Redis ไปที่พอร์ตที่ไม่มีอะไรฟัง
+- วิธีแก้: แก้เองโดยเอา `await` ออก ตั้ง `maxRetriesPerRequest: null` ให้คำสั่ง subscribe รอจน Redis กลับมา และเปลี่ยน `quit()` เป็น `disconnect()` ตอนปิด
+
+**3. เทสต์ token หมดอายุล้มเองได้เป็นครั้งคราว**
+
+- สิ่งที่ AI ทำ: เทสต์สร้าง token ด้วย `expiresIn: 1` โดยไม่คำนึงว่าเวลาหมดอายุถูกปัดเป็นวินาทีเต็ม
+- ผลที่เกิด: token มีอายุจริง 1 ถึง 996 มิลลิวินาที บางรอบจึงหมดอายุก่อนเชื่อมต่อเสร็จ
+- วิธีที่พบ: วัดอายุจริงของ token 200 ครั้งระหว่างตรวจ commit
+- วิธีแก้: แก้เองเป็น `expiresIn: 2`
+
+**4. การจองช้าหลายวินาทีเมื่อ Redis ล่ม**
+
+- สิ่งที่ AI ทำ: `POST /bookings` ส่งคำสั่งขอล็อกไปที่ Redis ทุกครั้ง แล้วค่อย fallback เมื่อคำสั่งล้ม
+- ผลที่เกิด: ขณะ Redis ล่ม ioredis ลองเชื่อมใหม่หลายรอบก่อนยอมแพ้ ทุกคำขอจองจึงรอหลายวินาที การจอง 100 คำขอใช้ 7.2 วินาที
+- วิธีที่พบ: เทสต์ concurrency กรณี Redis ต่อไม่ได้ผ่าน แต่ใช้เวลานานผิดปกติ
+- วิธีแก้: ตรวจสถานะ connection ก่อนขอล็อก ถ้าไม่พร้อมให้ข้ามไปใช้ constraint ทันที และเพิ่มเงื่อนไขเวลาในเทสต์
