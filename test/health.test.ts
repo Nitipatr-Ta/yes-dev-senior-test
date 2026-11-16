@@ -22,4 +22,21 @@ describe('GET /health', () => {
       checks: { database: 'up', redis: 'up' },
     });
   });
+
+  it('reports redis as down at once when it is unreachable, without hanging', async () => {
+    const noRedis = await buildTestApp({}, { REDIS_URL: 'redis://127.0.0.1:6399' });
+    try {
+      const started = Date.now();
+      const response = await noRedis.inject({ method: 'GET', url: '/health' });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toEqual({
+        status: 'degraded',
+        checks: { database: 'up', redis: 'down' },
+      });
+      expect(Date.now() - started).toBeLessThan(1_000);
+    } finally {
+      await noRedis.close();
+    }
+  });
 });

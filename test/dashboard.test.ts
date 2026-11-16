@@ -187,6 +187,115 @@ describe('booking dashboard', () => {
     });
   });
 
+  describe('GET /admin/bookings', () => {
+    const list = (query: string, headers = { authorization: `Bearer ${adminToken}` }) =>
+      app.inject({ method: 'GET', url: `/admin/bookings${query}`, headers });
+    // Other test files write bookings at the same time, so every check filters by our rooms.
+    const ofRoom = (index: number, extra = '') => list(`?roomId=${roomIds[index]}${extra}`);
+
+    it('is for admins only', async () => {
+      expect((await list('', {} as never)).statusCode).toBe(401);
+      expect((await list('', guest.headers)).statusCode).toBe(403);
+      expect((await list('')).statusCode).toBe(200);
+    });
+
+    it('lists every booking, newest first, with the guest email and room name', async () => {
+      const first = (await book(day(10), day(12))).json().booking;
+      const second = (await book(day(12), day(13))).json().booking;
+      await cancel(first.id);
+      await book(day(10), day(11), roomIds[1]);
+
+      const page = (await ofRoom(0)).json();
+
+      expect(page.total).toBe(2);
+      expect(page.limit).toBe(50);
+      expect(page.offset).toBe(0);
+      expect(page.bookings.map((b: { id: string }) => b.id)).toEqual([second.id, first.id]);
+      expect(page.bookings[0]).toEqual({
+        ...second,
+        userEmail: expect.stringContaining(`@${EMAIL_DOMAIN}`),
+        roomName: expect.stringContaining('Dashboard Villa'),
+      });
+      expect(page.bookings[1].status).toBe('cancelled');
+    });
+
+    it('filters by status and pages through the results', async () => {
+      const ids: string[] = [];
+      for (let index = 0; index < 5; index += 1) {
+        ids.push((await book(day(20 + index), day(21 + index))).json().booking.id);
+      }
+      await cancel(ids[0] as string);
+      await cancel(ids[1] as string);
+      const newestFirst = [...ids].reverse();
+      const idsOf = (response: { json: () => { bookings: { id: string }[] } }) =>
+        response.json().bookings.map((b) => b.id);
+
+      const confirmed = await ofRoom(0, '&status=confirmed');
+      const cancelled = await ofRoom(0, '&status=cancelled');
+      const pageOne = await ofRoom(0, '&limit=2');
+      const pageTwo = await ofRoom(0, '&limit=2&offset=2');
+      const pastTheEnd = await ofRoom(0, '&limit=2&offset=10');
+
+      expect(confirmed.json().total).toBe(3);
+      expect(idsOf(confirmed)).toEqual(newestFirst.slice(0, 3));
+      expect(cancelled.json().total).toBe(2);
+      expect(idsOf(pageOne)).toEqual(newestFirst.slice(0, 2));
+      expect(idsOf(pageTwo)).toEqual(newestFirst.slice(2, 4));
+      expect(pageOne.json().total).toBe(5);
+      expect(pastTheEnd.json()).toMatchObject({ bookings: [], total: 5, offset: 10 });
+    });
+
+    it.each(['?limit=0', '?limit=201', '?offset=-1', '?status=pending', '?roomId=abc', '?sort=price'])(
+      'rejects %s with 400',
+      async (query) => {
+        const response = await list(query);
+
+        expect(response.statusCode).toBe(400);
+        expect(response.json().error.code).toBe('VALIDATION_ERROR');
+      },
+    );
+  });
+
+  describe('summary page', () => {
+    it('serves the page and its script without authentication', async () => {
+      const page = await app.inject({ method: 'GET', url: '/admin' });
+      const script = await app.inject({ method: 'GET', url: '/admin/dashboard.js' });
+
+      expect(page.statusCode).toBe(200);
+      expect(page.headers['content-type']).toBe('text/html; charset=utf-8');
+      expect(page.body).toContain('<script src="/admin/dashboard.js"></script>');
+      expect(script.statusCode).toBe(200);
+      expect(script.headers['content-type']).toBe('text/javascript; charset=utf-8');
+      expect(script.body).toContain('/admin/dashboard/ws');
+    });
+
+    it('sends a policy that forbids inline and third-party scripts', async () => {
+      const page = await app.inject({ method: 'GET', url: '/admin' });
+      const policy = String(page.headers['content-security-policy']);
+
+      expect(policy).toContain("default-src 'none'");
+      expect(policy).toContain("script-src 'self'");
+      expect(policy).not.toMatch(/script-src[^;]*unsafe-inline/);
+      expect(policy).toContain("frame-ancestors 'none'");
+      expect(page.headers['x-content-type-options']).toBe('nosniff');
+      // The policy only holds if the page really has no inline script or event handler.
+      expect(page.body).not.toMatch(/<script(?![^>]*\ssrc=)[^>]*>/i);
+      expect(page.body).not.toMatch(/\son[a-z]+\s*=/i);
+    });
+
+    it('contains no data and no credentials', async () => {
+      const page = await app.inject({ method: 'GET', url: '/admin' });
+      const script = await app.inject({ method: 'GET', url: '/admin/dashboard.js' });
+
+      for (const body of [page.body, script.body]) {
+        expect(body).not.toContain('admin_local_dev');
+        expect(body).not.toMatch(/\b(localStorage|sessionStorage)\./);
+        // API values must reach the page as text, never as markup.
+        expect(body).not.toMatch(/\.(innerHTML|outerHTML)\b|insertAdjacentHTML|document\.write/);
+      }
+    });
+  });
+
   describe('WebSocket authentication', () => {
     it('rejects the upgrade with HTTP 401 or 403 when the header token is not an admin', async () => {
       await expect(connect({ authorization: 'Bearer nonsense' })).rejects.toThrow('401');

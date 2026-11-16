@@ -20,7 +20,7 @@
 docker-compose up --build
 ```
 
-API จะเปิดที่ `http://localhost:3000` ตรวจสถานะได้ที่ `GET /health`
+API จะเปิดที่ `http://localhost:3000` ตรวจสถานะได้ที่ `GET /health` และหน้า Summary ของ admin อยู่ที่ `http://localhost:3000/admin`
 
 เมื่อ API เริ่มทำงานจะรันไฟล์ใน `migrations/` ตามลำดับชื่อโดยอัตโนมัติ (สร้างตารางและข้อมูลห้องตั้งต้น) และบันทึกไฟล์ที่รันแล้วไว้ในตาราง `schema_migrations`
 
@@ -44,7 +44,7 @@ npm install
 DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_URL=redis://localhost:6379 npm test
 ```
 
-มี 166 เทสต์ใน 10 ไฟล์ ใช้เวลาประมาณ 3 วินาที
+มี 179 เทสต์ใน 10 ไฟล์ ใช้เวลาประมาณ 4 วินาที
 
 | ไฟล์ | ครอบคลุม |
 |---|---|
@@ -65,7 +65,7 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 
 Import ไฟล์ `postman/Ultra-Resort-Booking-Engine.postman_collection.json` เข้า Postman แล้วรันทั้ง collection ด้วย Collection Runner หรือกดทีละ request จากบนลงล่าง ไม่ต้องตั้ง environment
 
-- มี 34 request ใน 8 โฟลเดอร์: Health, Authentication, Rooms, API 2 Pricing, API 1 Booking, API 3 Dashboard, Cancellation และ Rate limiting ทุก request มีสคริปต์ตรวจผลลัพธ์
+- มี 37 request ใน 8 โฟลเดอร์: Health, Authentication, Rooms, API 2 Pricing, API 1 Booking, API 3 Dashboard, Cancellation และ Rate limiting ทุก request มีสคริปต์ตรวจผลลัพธ์
 - Request แรก (Register) สร้างผู้ใช้ใหม่และสุ่มช่วงวันที่จอง แล้วเก็บ token, `roomId` และ `bookingId` ไว้ใน collection variables ให้ request ถัดไป จึงรันซ้ำได้โดยไม่ต้องแก้ค่า และท้าย collection ยกเลิกการจองที่สร้างไว้
 - ตัวแปร `baseUrl`, `adminEmail` และ `adminPassword` มีค่าเริ่มต้นตรงกับ `docker-compose.yml` ถ้าเปลี่ยนค่าใน `.env` ให้แก้ที่ตัวแปรของ collection
 - โฟลเดอร์ Rate limiting วนยิง login ผิดจนได้ 429 ในครั้งที่ 11 หลังรันแล้วโควตา login ต่อ IP เหลือน้อย ให้รอ 1 นาทีก่อนรันทั้ง collection อีกรอบ
@@ -176,11 +176,11 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 
 ### Concurrency test (ทำแล้ว)
 
-`test/concurrency.test.ts` เปิด server จริงบนพอร์ตสุ่ม แล้วยิงคำขอผ่าน TCP จากผู้ใช้ 25 คน โดยมีคำขอวิ่งพร้อมกัน 100 รายการ ทุกเทสต์ตรวจในฐานข้อมูลตอนท้ายว่าไม่มีการจองที่ยืนยันแล้วคู่ใดของห้องเดียวกันมีช่วงวันทับกัน
+`test/concurrency.test.ts` เปิด server จริงบนพอร์ตสุ่ม แล้วยิงคำขอผ่าน TCP จากผู้ใช้ 3,000 คน โดยมีคำขอวิ่งพร้อมกัน 100 รายการ ทุกเทสต์ตรวจในฐานข้อมูลตอนท้ายว่าไม่มีการจองที่ยืนยันแล้วคู่ใดของห้องเดียวกันมีช่วงวันทับกัน
 
 | สถานการณ์ | ผลที่ตรวจ |
 |---|---|
-| 500 คำขอจองห้องเดียวกันช่วงวันเดียวกัน | สำเร็จ 1 รายการ ที่เหลือ 499 ได้ 409 |
+| ผู้ใช้ 3,000 คนจองห้องเดียวกันช่วงวันเดียวกัน คนละ 1 คำขอ | สำเร็จ 1 รายการ ที่เหลือ 2,999 ได้ 409 ทุกคนได้คำตอบภายในประมาณ 0.3 วินาทีบนเครื่องพัฒนา |
 | 600 คำขอสุ่มช่วงวัน 1–4 คืนที่ทับกันบน 3 ห้อง | ไม่มีคู่ใดทับกัน และรายการที่ตอบ 201 ตรงกับที่บันทึกในฐานข้อมูลทุกรายการ |
 | 10 คืน คืนละ 20 client ที่ลองใหม่เมื่อได้ `ROOM_BUSY` | แต่ละคืนถูกจอง 1 ครั้งพอดี อีก 190 คำขอได้ `ROOM_UNAVAILABLE` |
 | 30 client จองแล้วยกเลิกช่วงวันเดียวกันสลับกัน 10 รอบ | ทุกการจองที่สำเร็จถูกยกเลิกครบ ไม่มีช่วงที่จองซ้อน |
@@ -228,8 +228,19 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 
 | Endpoint | สิทธิ์ | หน้าที่ |
 |---|---|---|
+| `GET /admin` | ทุกคน (หน้าเว็บ ไม่มีข้อมูล) | หน้า Summary ต้องเข้าสู่ระบบด้วยบัญชี admin ในหน้า |
 | `GET /admin/dashboard` | admin | snapshot ของ dashboard ผ่าน HTTP |
+| `GET /admin/bookings` | admin | การจองทั้งหมดในระบบ ใหม่สุดก่อน แบ่งหน้าด้วย `limit` และ `offset` กรองด้วย `status` และ `roomId` |
 | `GET /admin/dashboard/ws` (WebSocket) | admin | snapshot ตอนเชื่อมต่อ แล้วส่ง event การจองแบบ real-time |
+
+**หน้า Summary** (`public/dashboard.html`, `public/dashboard.js`)
+
+- เปิด `http://localhost:3000/admin` แล้วเข้าสู่ระบบด้วยบัญชี admin (ค่าเริ่มต้น `admin@example.com` / `admin_local_dev`)
+- แสดงยอดสรุป 7 ค่า ตารางการจองทั้งหมดพร้อมสถานะ ราคา และกฎราคาที่ใช้ และรายการเหตุการณ์ล่าสุด
+- ยอดสรุปและ event มาทาง WebSocket ส่วนตารางมาจาก `GET /admin/bookings` เมื่อมีการจองหรือยกเลิก หน้าจะอัปเดตเองโดยไม่ต้องโหลดใหม่ และเชื่อมต่อใหม่เองเมื่อหลุด
+- เป็น HTML และ JavaScript ล้วน ไม่มี library ภายนอกและไม่มีขั้นตอน build
+- token เก็บในหน่วยความจำของหน้าเท่านั้น ไม่เขียนลง `localStorage` โหลดหน้าใหม่ต้องเข้าสู่ระบบอีกครั้ง
+- ค่าจาก API แสดงด้วย `textContent` เท่านั้น และหน้าส่ง Content-Security-Policy ที่ห้าม script แบบ inline และจากที่อื่น
 
 **การยืนยันตัวตนของ WebSocket** มีสองทาง
 
@@ -296,7 +307,8 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 | ขีดจำกัดการจอง | พักได้ไม่เกิน 30 คืน จองล่วงหน้าได้ไม่เกิน 365 วัน และ check-in ต้องไม่ใช่วันในอดีตตามเขตเวลา Asia/Bangkok | กันการจองที่ผิดปกติและจำกัดขนาดข้อมูล |
 | การยกเลิก | เจ้าของหรือ admin ยกเลิกได้ทุกเมื่อ ไม่มีค่าปรับ | โจทย์ไม่ระบุนโยบายยกเลิก |
 | ช่วงวันที่จอง | `[check_in, check_out)` วัน check-out ของคนหนึ่งเป็นวัน check-in ของอีกคนได้ | ตรงกับการใช้งานจริงของโรงแรม |
-| Dashboard แสดงอะไร | snapshot สรุปจำนวนและรายได้ พร้อมการจองล่าสุด แล้วส่ง event เมื่อมีการจองหรือยกเลิก | โจทย์ระบุเพียง dashboard แบบ real-time ข้อมูลเหล่านี้คือสิ่งที่ผู้ดูแลรีสอร์ทต้องเห็นทันที |
+| "หน้า Summary แสดงสถานะการจองทั้งหมด" | หน้าเว็บที่ `/admin` แสดงยอดสรุปและตารางการจองทุกรายการพร้อมสถานะ โดยรับข้อมูล real-time ทาง WebSocket | โจทย์ให้เลือก Webhook หรือ WebSocket เลือก WebSocket เพราะ admin เปิดหน้าค้างไว้ดู จึงไม่ต้องมีระบบปลายทางมารับ webhook |
+| การจองทั้งหมดมีจำนวนมาก | ตารางแบ่งหน้าละ 20 รายการ ใหม่สุดก่อน และกรองตามสถานะได้ | ส่งทุกรายการในครั้งเดียวจะช้าลงเรื่อย ๆ เมื่อข้อมูลโต |
 
 ## การใช้ AI
 
@@ -314,6 +326,7 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 | API 2: Pricing | เขียน `src/pricing/*`, `src/bookings/schemas.ts`, `src/db/transaction.ts`, `test/pricing.test.ts` และปรับ `POST /bookings` ลง repo โดยตรง เลือกวิธีปัดเศษ การล็อกประเภทห้อง และนิยาม "การพักที่เสร็จแล้ว" | ตรวจโค้ดและ commit |
 | API 3: Dashboard | เขียน `src/dashboard/*`, `src/bookings/model.ts`, `test/dashboard.test.ts` และปรับ `POST /bookings` กับการยกเลิกให้ส่ง event ลง repo โดยตรง เลือกวิธียืนยันตัวตนของ WebSocket และเนื้อหา snapshot | ตรวจโค้ดและ commit แก้การ subscribe และเทสต์ token หมดอายุด้วยตัวเองตามผลตรวจ |
 | Rate limiting | เขียน `src/rate-limit/*`, `test/rate-limit.test.ts` และต่อเข้ากับ route ลง repo โดยตรง เลือกแบบ fixed window ค่าขีดจำกัด และให้ปล่อยผ่านเมื่อ Redis ล่ม | ตรวจโค้ดและ commit |
+| หน้า Summary และการเทียบกับโจทย์ | เทียบงานกับโจทย์แล้วเสนอส่วนที่ขาด เขียน `public/dashboard.*`, `src/dashboard/bookings.ts`, เทสต์ผู้ใช้ 3,000 คน และแก้ `/health` ให้ไม่รอ Redis ลง repo โดยตรง | ตัดสินใจว่าจะทำส่วนใด เปิดหน้าใน browser ตรวจ และ commit |
 | Postman collection | สร้าง `postman/Ultra-Resort-Booking-Engine.postman_collection.json` พร้อมสคริปต์ตรวจผลในทุก request และตรวจด้วยตัวรันที่เขียนเองกับ API จริง | ตรวจใน Postman และ commit |
 | Concurrency test และเทสต์ที่เหลือ | เขียน `test/concurrency.test.ts`, `test/hub.test.ts`, `test/db.test.ts`, `test/config.test.ts` และเพิ่มกรณีใน `test/bookings.test.ts` กับ `test/dashboard.test.ts` ลง repo โดยตรง แก้ `POST /bookings` ให้ไม่รอ Redis ตอนล่ม | ตรวจโค้ดและ commit |
 | README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |

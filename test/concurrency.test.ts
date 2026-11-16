@@ -14,7 +14,8 @@ import type { FastifyInstance } from 'fastify';
 import { fromDayNumber, resortToday, toDayNumber } from '../src/bookings/dates.js';
 import { buildTestApp } from './helpers.js';
 
-const USERS = 25;
+/** The campaign scenario: thousands of different users pressing "book" at the same moment. */
+const USERS = 3_000;
 const ROOMS = 3;
 const TEST_TIMEOUT_MS = 60_000;
 /**
@@ -157,7 +158,7 @@ describe('booking under concurrent load', () => {
     );
     roomIds = rooms.rows.map((row) => row.id as string);
 
-    // Inserted directly: registering through the API would hash 25 passwords for no benefit.
+    // Inserted directly: registering through the API would hash 3,000 passwords for no benefit.
     const users = await app.db.query(
       `INSERT INTO users (email, password_hash)
        SELECT gen_random_uuid()::text || $1::text, 'not-a-real-hash'
@@ -182,19 +183,24 @@ describe('booking under concurrent load', () => {
   });
 
   it(
-    'accepts exactly one of 500 concurrent requests for the same room and dates',
+    'gives the single villa to exactly one of 3,000 users booking the same dates at once',
     async () => {
+      const started = Date.now();
       const outcomes = await Promise.all(
-        Array.from({ length: 500 }, (_unused, index) =>
+        Array.from({ length: USERS }, (_unused, index) =>
           book(userToken(index), room(0), day(10), day(13)),
         ),
       );
+      const elapsedMs = Date.now() - started;
 
       const counts = tally(outcomes);
       expect(counts['201']).toBe(1);
-      expect((counts['409 ROOM_BUSY'] ?? 0) + (counts['409 ROOM_UNAVAILABLE'] ?? 0)).toBe(499);
+      expect((counts['409 ROOM_BUSY'] ?? 0) + (counts['409 ROOM_UNAVAILABLE'] ?? 0)).toBe(USERS - 1);
       expect(await confirmedIds()).toEqual([outcomes.find((o) => o.status === 201)?.bookingId]);
       expect(await overlappingPairs()).toBe(0);
+      // Every user gets an answer quickly; nobody is left waiting on a lock.
+      expect(elapsedMs).toBeLessThan(15_000);
+      console.info(`3,000 booking requests answered in ${elapsedMs} ms: ${JSON.stringify(counts)}`);
     },
     TEST_TIMEOUT_MS,
   );

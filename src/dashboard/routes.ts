@@ -1,8 +1,10 @@
+import { readFile } from 'node:fs/promises';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { RawData, WebSocket } from 'ws';
 import { z } from 'zod';
 import type { AuthUser } from '../auth/plugin.js';
 import { byIp } from '../rate-limit/plugin.js';
+import { adminBookingsQuery, listAllBookings } from './bookings.js';
 import { BOOKING_EVENTS_CHANNEL } from './events.js';
 import { DashboardHub } from './hub.js';
 import { loadDashboardSnapshot } from './snapshot.js';
@@ -11,6 +13,19 @@ import { loadDashboardSnapshot } from './snapshot.js';
 export const CLOSE_UNAUTHORIZED = 4401;
 export const CLOSE_FORBIDDEN = 4403;
 const CLOSE_INTERNAL_ERROR = 1011;
+
+const PUBLIC_DIR = new URL('../../public/', import.meta.url);
+// Scripts only from this origin and none inline, so booking data shown on the page could not
+// run as code even if it were not escaped. Styles are inline in the page's own <style>.
+const PAGE_CSP = [
+  "default-src 'none'",
+  "script-src 'self'",
+  "style-src 'unsafe-inline'",
+  "connect-src 'self' ws: wss:",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join('; ');
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
@@ -60,6 +75,32 @@ export async function dashboardRoutes(
 
   app.get('/admin/dashboard', { preHandler: app.requireAdmin }, async () =>
     loadDashboardSnapshot(app.db, app.now()),
+  );
+
+  app.get('/admin/bookings', { preHandler: app.requireAdmin }, async (request) =>
+    listAllBookings(app.db, adminBookingsQuery.parse(request.query)),
+  );
+
+  // The summary page. The files hold no data: the page logs in through /auth/login and reads
+  // everything through the admin-only endpoints above, so serving it needs no authentication.
+  const [pageHtml, pageScript] = await Promise.all([
+    readFile(new URL('dashboard.html', PUBLIC_DIR), 'utf8'),
+    readFile(new URL('dashboard.js', PUBLIC_DIR), 'utf8'),
+  ]);
+  const sendPage = (reply: FastifyReply, contentType: string, content: string) =>
+    reply
+      .header('Content-Security-Policy', PAGE_CSP)
+      .header('X-Content-Type-Options', 'nosniff')
+      .header('Referrer-Policy', 'no-referrer')
+      .header('Cache-Control', 'no-store')
+      .type(contentType)
+      .send(content);
+
+  app.get('/admin', async (_request, reply) =>
+    sendPage(reply, 'text/html; charset=utf-8', pageHtml),
+  );
+  app.get('/admin/dashboard.js', async (_request, reply) =>
+    sendPage(reply, 'text/javascript; charset=utf-8', pageScript),
   );
 
   // Clients that can set headers (servers, Postman) authenticate before the upgrade and get a

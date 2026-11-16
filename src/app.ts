@@ -63,7 +63,12 @@ export async function buildApp(
   await app.register(dashboardRoutes, options.dashboard ?? {});
 
   app.get('/health', async (_request, reply) => {
-    const [database, cache] = await Promise.allSettled([db.query('SELECT 1'), redis.ping()]);
+    // A command sent while ioredis is reconnecting waits for several retries, so a Redis that
+    // is already known to be down is reported at once instead of stalling the health check.
+    const [database, cache] = await Promise.allSettled([
+      db.query('SELECT 1'),
+      redis.status === 'ready' ? redis.ping() : Promise.reject(new Error('redis not ready')),
+    ]);
     const checks = {
       database: database.status === 'fulfilled' ? 'up' : 'down',
       redis: cache.status === 'fulfilled' ? 'up' : 'down',

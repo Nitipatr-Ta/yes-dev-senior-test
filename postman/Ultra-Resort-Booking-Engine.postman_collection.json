@@ -1308,7 +1308,7 @@
     },
     {
       "name": "5. API 3 - Booking Dashboard",
-      "description": "Dashboard สำหรับ admin\n\n**ทดสอบ WebSocket ใน Postman**\n\n1. New > WebSocket\n2. URL: `ws://localhost:3000/admin/dashboard/ws`\n3. แท็บ Headers เพิ่ม `Authorization` = `Bearer <adminToken>` (คัดลอกค่าจากตัวแปร `adminToken` ของ collection นี้ หลังรัน \"Login as admin\")\n4. กด Connect จะได้ข้อความ `snapshot` ทันที\n5. รัน \"Create booking\" ในโฟลเดอร์ 4 จะได้ `booking.created` และรัน \"Cancel booking\" ในโฟลเดอร์ 6 จะได้ `booking.cancelled`\n\nถ้าไม่ส่ง header ให้ส่งข้อความแรกเป็น `{\"type\":\"auth\",\"token\":\"<adminToken>\"}` ภายใน 5 วินาที (วิธีที่ browser ใช้) ส่ง `{\"type\":\"snapshot\"}` เพื่อขอ snapshot ใหม่ได้ทุกเมื่อ\n\ntoken ที่ไม่ใช่ admin ถูกปฏิเสธด้วย HTTP 403 ก่อน upgrade หรือปิด socket ด้วย code 4403",
+      "description": "Dashboard สำหรับ admin\n\n**หน้า Summary**: เปิด `http://localhost:3000/admin` ใน browser แล้วเข้าสู่ระบบด้วยบัญชี admin หน้านี้แสดงยอดสรุปและตารางการจองทั้งหมด และอัปเดตเองเมื่อมีการจองหรือยกเลิก ลองรัน request ในโฟลเดอร์ 4 และ 6 ขณะเปิดหน้านี้ไว้\n\n**ทดสอบ WebSocket ใน Postman**\n\n1. New > WebSocket\n2. URL: `ws://localhost:3000/admin/dashboard/ws`\n3. แท็บ Headers เพิ่ม `Authorization` = `Bearer <adminToken>` (คัดลอกค่าจากตัวแปร `adminToken` ของ collection นี้ หลังรัน \"Login as admin\")\n4. กด Connect จะได้ข้อความ `snapshot` ทันที\n5. รัน \"Create booking\" ในโฟลเดอร์ 4 จะได้ `booking.created` และรัน \"Cancel booking\" ในโฟลเดอร์ 6 จะได้ `booking.cancelled`\n\nถ้าไม่ส่ง header ให้ส่งข้อความแรกเป็น `{\"type\":\"auth\",\"token\":\"<adminToken>\"}` ภายใน 5 วินาที (วิธีที่ browser ใช้) ส่ง `{\"type\":\"snapshot\"}` เพื่อขอ snapshot ใหม่ได้ทุกเมื่อ\n\ntoken ที่ไม่ใช่ admin ถูกปฏิเสธด้วย HTTP 403 ก่อน upgrade หรือปิด socket ด้วย code 4403",
       "item": [
         {
           "name": "Dashboard snapshot",
@@ -1355,6 +1355,162 @@
                   "pm.test('การจองที่เพิ่งสร้างอยู่ในรายการล่าสุด', function () {",
                   "  const ids = snapshot.recentBookings.map((booking) => booking.id);",
                   "  pm.expect(ids).to.include(pm.collectionVariables.get('bookingId'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "All bookings",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/bookings?roomId={{roomId}}&limit=5&offset=0",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "bookings"
+              ],
+              "query": [
+                {
+                  "key": "roomId",
+                  "value": "{{roomId}}"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                },
+                {
+                  "key": "offset",
+                  "value": "0"
+                }
+              ]
+            },
+            "description": "การจองทั้งหมดในระบบ ใหม่สุดก่อน แบ่งหน้าด้วย `limit` (1-200) และ `offset` กรองได้ด้วย `status` (`confirmed`, `cancelled`) และ `roomId` หน้า Summary ใช้ endpoint นี้แสดงตาราง",
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const page = pm.response.json();",
+                  "pm.test('ตอบ 200 พร้อมรายการและจำนวนทั้งหมด', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(page.limit).to.eql(5);",
+                  "  pm.expect(page.offset).to.eql(0);",
+                  "  pm.expect(page.total).to.be.at.least(2);",
+                  "  pm.expect(page.bookings.length).to.be.at.most(5);",
+                  "});",
+                  "pm.test('แต่ละรายการมีอีเมลผู้จองและชื่อห้อง และรายการใหม่สุดอยู่บน', function () {",
+                  "  pm.expect(page.bookings[0]).to.include.keys('userEmail', 'roomName', 'status', 'totalPriceSatang');",
+                  "  pm.expect(page.bookings[0].id).to.eql(pm.collectionVariables.get('secondBookingId'));",
+                  "  pm.expect(page.bookings[0].userEmail).to.eql(pm.collectionVariables.get('userEmail'));",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "All bookings - กรองตามสถานะ",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/bookings?roomId={{roomId}}&status=confirmed&limit=200",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "bookings"
+              ],
+              "query": [
+                {
+                  "key": "roomId",
+                  "value": "{{roomId}}"
+                },
+                {
+                  "key": "status",
+                  "value": "confirmed"
+                },
+                {
+                  "key": "limit",
+                  "value": "200"
+                }
+              ]
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [
+                {
+                  "key": "token",
+                  "value": "{{adminToken}}",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ได้เฉพาะการจองที่ยืนยันแล้ว', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "  const statuses = pm.response.json().bookings.map((booking) => booking.status);",
+                  "  pm.expect(statuses).to.not.include('cancelled');",
+                  "  pm.expect(statuses).to.include('confirmed');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "All bookings - ผู้ใช้ทั่วไป",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/admin/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "admin",
+                "bookings"
+              ]
+            }
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ตอบ 403 FORBIDDEN', function () {",
+                  "  pm.response.to.have.status(403);",
+                  "  pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN');",
                   "});"
                 ]
               }
