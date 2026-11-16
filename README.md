@@ -37,12 +37,14 @@ docker-compose up --build
 
 ### รันเทสต์
 
-เทสต์ต่อกับ PostgreSQL และ Redis จริง จึงต้องเปิด container ไว้ก่อน รหัสผ่านใน `DATABASE_URL` ต้องตรงกับที่ container ใช้ (`booking_local_dev` เมื่อไม่มีไฟล์ `.env`)
+เทสต์ต่อกับ PostgreSQL และ Redis จริง จึงต้องเปิด container ไว้ก่อน (`docker-compose up`)
 
 ```bash
 npm install
-DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_URL=redis://localhost:6379 npm test
+npm test
 ```
+
+เทสต์หาที่อยู่ของ PostgreSQL และ Redis เอง โดยใช้ตัวแปรชุดเดียวกับที่ `docker-compose.yml` อ่าน (`POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT`, `REDIS_PORT`) จากไฟล์ `.env` ถ้ามี ไม่อย่างนั้นใช้ค่าเริ่มต้นเดียวกับ compose จึงตรงกับ container ที่รันอยู่เสมอ ถ้าต้องการชี้ไปที่อื่น ให้ส่ง `DATABASE_URL` และ `REDIS_URL` ตอนรัน
 
 มี 179 เทสต์ใน 10 ไฟล์ ใช้เวลาประมาณ 4 วินาที
 
