@@ -1,67 +1,19 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { withTransaction } from '../db/transaction.js';
 import { HttpError } from '../errors.js';
+import { quoteStay } from '../pricing/quote.js';
 import { acquireLock, releaseLock, type Lock } from '../redis/lock.js';
-import { resortToday, toDayNumber } from './dates.js';
+import { resortToday } from './dates.js';
+import { calendarDate, idSchema, makeStayCheck, stayFields } from './schemas.js';
 
 const PG_FOREIGN_KEY_VIOLATION = '23503';
 const PG_EXCLUSION_VIOLATION = '23P01';
-
-export const MAX_NIGHTS = 30;
-export const MAX_ADVANCE_DAYS = 365;
 const ROOM_LOCK_TTL_MS = 5_000;
 
 export const roomLockKey = (roomId: string) => `lock:room:${roomId}`;
 
-// BIGINT ids travel as decimal strings; 18 digits always fits in a PostgreSQL BIGINT.
-const id = z.string().regex(/^[1-9]\d{0,17}$/, 'must be a positive integer id');
-
-const calendarDate = z
-  .string()
-  .refine((value) => toDayNumber(value) !== null, 'must be a valid date in YYYY-MM-DD format');
-
-const stayFields = { checkIn: calendarDate, checkOut: calendarDate };
-
-function checkStay(
-  value: { checkIn: string; checkOut: string },
-  context: z.RefinementCtx,
-): void {
-  const checkIn = toDayNumber(value.checkIn);
-  const checkOut = toDayNumber(value.checkOut);
-  const today = toDayNumber(resortToday());
-  if (checkIn === null || checkOut === null || today === null) return;
-
-  const issue = (path: string, message: string) =>
-    context.addIssue({ code: 'custom', path: [path], message });
-
-  if (checkOut <= checkIn) issue('checkOut', 'must be after checkIn');
-  else if (checkOut - checkIn > MAX_NIGHTS) issue('checkOut', `stay is limited to ${MAX_NIGHTS} nights`);
-  if (checkIn < today) issue('checkIn', 'must not be in the past');
-  if (checkIn > today + MAX_ADVANCE_DAYS) {
-    issue('checkIn', `must be within ${MAX_ADVANCE_DAYS} days from today`);
-  }
-}
-
-const createBookingBody = z
-  .strictObject({ roomId: z.union([id, z.number().int().positive().transform(String)]), ...stayFields })
-  .superRefine(checkStay);
-
-const availabilityQuery = z
-  .strictObject({ checkIn: calendarDate.optional(), checkOut: calendarDate.optional() })
-  .superRefine((value, context) => {
-    if (value.checkIn === undefined && value.checkOut === undefined) return;
-    if (value.checkIn === undefined || value.checkOut === undefined) {
-      context.addIssue({
-        code: 'custom',
-        path: [value.checkIn === undefined ? 'checkIn' : 'checkOut'],
-        message: 'checkIn and checkOut must be given together',
-      });
-      return;
-    }
-    checkStay({ checkIn: value.checkIn, checkOut: value.checkOut }, context);
-  });
-
-const bookingParams = z.strictObject({ id });
+const bookingParams = z.strictObject({ id: idSchema });
 
 interface BookingRow {
   id: string;
@@ -100,6 +52,31 @@ function pgErrorCode(error: unknown): string | undefined {
 }
 
 export async function bookingRoutes(app: FastifyInstance): Promise<void> {
+  // "Today" comes from app.now(), so tests can pin the clock.
+  const checkStay = makeStayCheck(() => resortToday(app.now()));
+
+  const createBookingBody = z
+    .strictObject({
+      roomId: z.union([idSchema, z.number().int().positive().transform(String)]),
+      ...stayFields,
+    })
+    .superRefine(checkStay);
+
+  const availabilityQuery = z
+    .strictObject({ checkIn: calendarDate.optional(), checkOut: calendarDate.optional() })
+    .superRefine((value, context) => {
+      if (value.checkIn === undefined && value.checkOut === undefined) return;
+      if (value.checkIn === undefined || value.checkOut === undefined) {
+        context.addIssue({
+          code: 'custom',
+          path: [value.checkIn === undefined ? 'checkIn' : 'checkOut'],
+          message: 'checkIn and checkOut must be given together',
+        });
+        return;
+      }
+      checkStay({ checkIn: value.checkIn, checkOut: value.checkOut }, context);
+    });
+
   app.get('/rooms', async (request) => {
     const query = availabilityQuery.parse(request.query);
     const withAvailability = query.checkIn !== undefined && query.checkOut !== undefined;
@@ -137,16 +114,6 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
 
   app.post('/bookings', { preHandler: app.authenticate }, async (request, reply) => {
     const body = createBookingBody.parse(request.body);
-    const nights = (toDayNumber(body.checkOut) ?? 0) - (toDayNumber(body.checkIn) ?? 0);
-
-    const room = await app.db.query<{ base_price_satang: string }>(
-      `SELECT t.base_price_satang
-       FROM rooms r JOIN room_types t ON t.id = r.room_type_id
-       WHERE r.id = $1`,
-      [body.roomId],
-    );
-    const basePrice = room.rows[0]?.base_price_satang;
-    if (basePrice === undefined) throw new HttpError(404, 'ROOM_NOT_FOUND', 'Room not found');
 
     // Layer 1: one request per room reaches the database at a time; the rest are turned away
     // here without opening a transaction. This sheds load. It does not guarantee correctness.
@@ -169,22 +136,38 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      // Placeholder until the Dynamic Pricing Engine (API 2) supplies the price and rules.
-      const nightlyPrice = Number(basePrice);
-      const totalPrice = nightlyPrice * nights;
-      if (!Number.isSafeInteger(totalPrice)) throw new Error('booking total exceeds safe integer');
+      const booking = await withTransaction(app.db, async (client) => {
+        // The price is fixed at the moment of booking and stored with the booking.
+        const quote = await quoteStay(client, {
+          roomId: body.roomId,
+          userId: request.user.sub,
+          checkIn: body.checkIn,
+          checkOut: body.checkOut,
+          now: app.now(),
+          lockRoomType: true,
+        });
 
-      // Layer 2: bookings_no_overlap rejects the insert if any confirmed booking for this room
-      // overlaps, even when the Redis lock expired mid-request or was never taken.
-      const inserted = await app.db.query<BookingRow>(
-        `INSERT INTO bookings
-           (room_id, user_id, check_in, check_out, nightly_price_satang, total_price_satang, price_rules)
-         VALUES ($1, $2, $3::date, $4::date, $5, $6, $7::jsonb)
-         RETURNING ${BOOKING_COLUMNS}`,
-        [body.roomId, request.user.sub, body.checkIn, body.checkOut, nightlyPrice, totalPrice, '[]'],
-      );
-      const booking = inserted.rows[0];
-      if (!booking) throw new Error('INSERT INTO bookings returned no row');
+        // Layer 2: bookings_no_overlap rejects the insert if any confirmed booking for this
+        // room overlaps, even when the Redis lock expired mid-request or was never taken.
+        const inserted = await client.query<BookingRow>(
+          `INSERT INTO bookings
+             (room_id, user_id, check_in, check_out, nightly_price_satang, total_price_satang, price_rules)
+           VALUES ($1, $2, $3::date, $4::date, $5, $6, $7::jsonb)
+           RETURNING ${BOOKING_COLUMNS}`,
+          [
+            body.roomId,
+            request.user.sub,
+            body.checkIn,
+            body.checkOut,
+            quote.nightlyPriceSatang,
+            quote.totalPriceSatang,
+            JSON.stringify(quote.rules),
+          ],
+        );
+        const row = inserted.rows[0];
+        if (!row) throw new Error('INSERT INTO bookings returned no row');
+        return row;
+      });
       return await reply.code(201).send({ booking: toBooking(booking) });
     } catch (error) {
       const code = pgErrorCode(error);
@@ -196,7 +179,7 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
         );
       }
       if (code === PG_FOREIGN_KEY_VIOLATION) {
-        // The room row was read above, so the missing parent is the token's user.
+        // The room row was read in the same transaction, so the missing parent is the user.
         throw new HttpError(401, 'UNAUTHORIZED', 'User no longer exists');
       }
       throw error;

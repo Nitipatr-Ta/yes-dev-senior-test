@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { fromDayNumber, resortToday, toDayNumber } from '../src/bookings/dates.js';
-import { MAX_ADVANCE_DAYS, MAX_NIGHTS, roomLockKey } from '../src/bookings/routes.js';
+import { roomLockKey } from '../src/bookings/routes.js';
+import { MAX_ADVANCE_DAYS, MAX_NIGHTS } from '../src/bookings/schemas.js';
 import { acquireLock, releaseLock } from '../src/redis/lock.js';
 import { buildTestApp } from './helpers.js';
 
@@ -11,6 +12,8 @@ const BASE_PRICE_SATANG = 2_000_000;
 const today = toDayNumber(resortToday()) as number;
 /** Calendar date `offset` days from today at the resort. */
 const day = (offset: number) => fromDayNumber(today + offset);
+// 10:00 at the resort (03:00 UTC): outside peak hour, so prices here stay at the base price.
+const MORNING = new Date(today * 86_400_000 + 3 * 3_600_000);
 
 describe('calendar dates', () => {
   it('accepts real dates and rejects impossible ones', () => {
@@ -29,6 +32,8 @@ describe('calendar dates', () => {
 
 describe('booking API', () => {
   let app: FastifyInstance;
+  let roomTypeId: string;
+  let roomTypeName: string;
   let roomId: string;
   let alice: { id: string; headers: { authorization: string } };
   let bob: { id: string; headers: { authorization: string } };
@@ -60,14 +65,20 @@ describe('booking API', () => {
   };
 
   beforeAll(async () => {
-    app = await buildTestApp();
-    // A room of its own keeps this file independent of the seeded villa and of other test files.
-    const room = await app.db.query(
-      `INSERT INTO rooms (room_type_id, name)
-       SELECT id, $1 FROM room_types WHERE name = 'The Royal Hideaway' RETURNING id`,
-      [`Test Villa ${randomUUID()}`],
+    app = await buildTestApp({ now: () => MORNING });
+    // A room type of its own keeps this file independent of the seeded villa and other test
+    // files. It has two rooms and only the first is booked, so the last-room rule never applies.
+    roomTypeName = `Test Type ${randomUUID()}`;
+    const type = await app.db.query(
+      `INSERT INTO room_types (name, base_price_satang) VALUES ($1, $2) RETURNING id`,
+      [roomTypeName, BASE_PRICE_SATANG],
     );
-    roomId = room.rows[0].id;
+    roomTypeId = type.rows[0].id;
+    const rooms = await app.db.query(
+      `INSERT INTO rooms (room_type_id, name) VALUES ($1, $2), ($1, $3) RETURNING id`,
+      [roomTypeId, `Test Villa ${randomUUID()}`, `Test Villa ${randomUUID()}`],
+    );
+    roomId = rooms.rows[0].id;
     [alice, bob] = await Promise.all([createUser(), createUser()]);
   });
 
@@ -78,7 +89,8 @@ describe('booking API', () => {
 
   afterAll(async () => {
     await app.db.query('DELETE FROM bookings WHERE room_id = $1', [roomId]);
-    await app.db.query('DELETE FROM rooms WHERE id = $1', [roomId]);
+    await app.db.query('DELETE FROM rooms WHERE room_type_id = $1', [roomTypeId]);
+    await app.db.query('DELETE FROM room_types WHERE id = $1', [roomTypeId]);
     await app.db.query('DELETE FROM users WHERE email LIKE $1', [`%@${EMAIL_DOMAIN}`]);
     await app.close();
   });
@@ -335,7 +347,7 @@ describe('booking API', () => {
     expect((await rooms('')).room).toEqual({
       id: roomId,
       name: expect.any(String),
-      roomType: 'The Royal Hideaway',
+      roomType: roomTypeName,
       basePriceSatang: BASE_PRICE_SATANG,
     });
     expect((await rooms(`?checkIn=${day(12)}&checkOut=${day(14)}`)).room.available).toBe(false);

@@ -51,8 +51,8 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 | โครงโปรเจกต์, Docker Compose, health check | เสร็จ |
 | Database schema และ index สำหรับ date overlap | เสร็จ |
 | Authentication (JWT) และ input validation | เสร็จ |
-| API 1: High-Concurrency Booking | เสร็จ (ใช้ราคาตั้งต้น รอ API 2) |
-| API 2: Dynamic Pricing Engine | ยังไม่เริ่ม |
+| API 1: High-Concurrency Booking | เสร็จ |
+| API 2: Dynamic Pricing Engine | เสร็จ |
 | API 3: Booking Dashboard (WebSocket) | ยังไม่เริ่ม |
 | Redis rate limiting | ยังไม่เริ่ม |
 | Concurrency test | มีใน `test/bookings.test.ts` แล้ว ยังไม่มี load test แยก |
@@ -139,15 +139,44 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 | 409 | `ROOM_UNAVAILABLE` | ช่วงวันทับกับการจองที่ยืนยันแล้ว |
 | 409 | `ROOM_BUSY` | มีคำขอจองห้องเดียวกันกำลังทำงานอยู่ ลองใหม่ได้ |
 
-ราคาตอนนี้คือราคาตั้งต้นคูณจำนวนคืน และ `priceRules` เป็น `[]` จนกว่า API 2 จะเสร็จ
+ราคาคำนวณด้วย Dynamic Pricing Engine (API 2) ภายใน transaction เดียวกับ `INSERT` และบันทึกไว้กับการจอง
 
 เทสต์ใน `test/bookings.test.ts` ยิง 100 คำขอพร้อมกันในช่วงวันเดียวกันแล้วตรวจว่าสำเร็จ 1 รายการ ยิงคำขอที่ช่วงวันทับกันบางส่วนแล้วตรวจว่าไม่มีคู่ใดทับกันในฐานข้อมูล และยิง `INSERT` พร้อมกันโดยไม่ผ่านล็อกเพื่อยืนยันว่า constraint กันได้เอง
 
+### API 2: Dynamic Pricing Engine (ทำแล้ว)
+
+| Endpoint | สิทธิ์ | หน้าที่ |
+|---|---|---|
+| `GET /pricing/quote?roomId=&checkIn=&checkOut=` | ผู้ใช้ | ราคาที่จะได้ถ้าจองตอนนี้ พร้อมกฎที่ใช้ |
+
+| กฎ | เงื่อนไข | ตัวคูณ |
+|---|---|---|
+| `LAST_ROOM` | ห้องประเภทเดียวกันที่ว่างตลอดช่วงวันที่ขอ เหลือ 1 ห้อง (นับห้องที่กำลังจอง) | ×1.20 |
+| `PEAK_HOUR` | เวลาที่กดจองอยู่ระหว่าง 20:00 ถึงก่อน 22:00 ตามเวลา Asia/Bangkok | ×1.15 |
+| `LOYAL_GUEST` | ผู้จองมีการจองที่ยืนยันแล้วและ check-out ไม่เกินวันนี้ ตั้งแต่ 4 ครั้งขึ้นไป | ×0.90 |
+
+แบ่งเป็นสองชั้น
+
+- **`src/pricing/engine.ts`** เป็น pure function `calculateNightlyPrice` รับราคาตั้งต้น เวลาที่จอง จำนวนห้องว่าง และจำนวนครั้งที่เคยพัก ไม่อ่านนาฬิกา ไม่แตะฐานข้อมูล จึงทดสอบทุกกรณีได้โดยตรง
+- **`src/pricing/quote.ts`** ดึงข้อมูลที่ engine ต้องใช้จากฐานข้อมูล แล้วเรียก engine ใช้ทั้งใน `GET /pricing/quote` และ `POST /bookings`
+
+การคำนวณเงิน
+
+- ตัวคูณเก็บเป็น basis point (10000 = 1.0) คูณทุกตัวด้วย `BigInt` ก่อน แล้วหารและปัดครั้งเดียวตอนท้ายแบบปัดครึ่งขึ้น ไม่มีทศนิยมแบบ floating point แตะราคา ผลลัพธ์จึงไม่ขึ้นกับลำดับกฎ
+- ราคารวม = ราคาต่อคืน × จำนวนคืน
+- ทุกกฎที่เข้าเงื่อนไขถูกบันทึกใน `price_rules` ของการจอง พร้อมตัวคูณและคำอธิบาย
+
+ความสอดคล้องเมื่อจองพร้อมกัน
+
+- `POST /bookings` คำนวณราคาใน transaction เดียวกับ `INSERT` และล็อกแถวประเภทห้องด้วย `SELECT ... FOR NO KEY UPDATE` การจองห้องประเภทเดียวกันจึงคำนวณราคาทีละรายการ และจำนวนห้องว่างที่ใช้คิดกฎ `LAST_ROOM` ไม่ล้าสมัยก่อนบันทึก
+- ตัวอย่าง: ห้อง 2 หลังว่างอยู่ แล้วมีคำขอจองทั้งสองหลังพร้อมกัน ฝ่ายหนึ่งได้ราคาปกติ อีกฝ่ายได้ +20% เสมอ ไม่มีกรณีที่ทั้งคู่ได้ราคาปกติ
+- ล็อกนี้ทำให้การจองห้องประเภทเดียวกันต่างห้องรอกันสั้น ๆ ระหว่างคำนวณ ซึ่งยอมรับได้เพราะ transaction มีเพียง 2 query และ 1 `INSERT`
+
+ราคาจาก `GET /pricing/quote` ไม่ได้ถูกจองไว้ ราคาจริงคำนวณใหม่ตอน `POST /bookings` และอาจต่างได้ถ้าเวลาข้ามช่วง peak hour หรือมีคนจองห้องอื่นไปก่อน
+
+เวลาปัจจุบันมาจาก `app.now()` ซึ่งเทสต์แทนค่าได้ เทสต์ใน `test/pricing.test.ts` ครอบคลุมขอบเวลา 19:59:59, 20:00:00, 21:59:59 และ 22:00:00 การรวมทุกคู่ของกฎ การปัดเศษ และการจองสองห้องสุดท้ายพร้อมกัน 10 รอบ
+
 > หัวข้อถัดจากนี้คือการออกแบบที่วางไว้ ยังไม่มีโค้ด จะปรับให้ตรงกับโค้ดจริงเมื่อแต่ละส่วนเสร็จ
-
-### Dynamic Pricing
-
-เป็น pure function ที่รับเวลา จำนวนห้องว่าง และประวัติการพักของลูกค้า คำนวณด้วยจำนวนเต็มหน่วยสตางค์ ราคาและกฎที่ใช้จะถูกบันทึกไว้กับการจอง
 
 ### Dashboard
 
@@ -172,7 +201,7 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 
 ## การใช้ AI
 
-ใช้ Claude Code (Claude Fable 5.2) ช่วยวางแผนและเขียนโค้ด โดยทำทีละส่วน
+ใช้ Claude Code (Claude Fable 5.2 และ Claude Opus 5.5 ตั้งแต่ส่วน API 2) ช่วยวางแผนและเขียนโค้ด โดยทำทีละส่วน
 
 ### ส่วนที่ใช้ AI
 
@@ -183,6 +212,7 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 | Database schema และ migration | ออกแบบ schema และให้เนื้อหา `migrations/*.sql`, `src/db/migrate.ts` พร้อมคำอธิบาย | พิมพ์โค้ดเองทีละไฟล์ แก้ `src/server.ts` และ `Dockerfile` รัน container ตรวจ log และ commit |
 | Authentication | เขียน `src/auth/*`, `src/errors.ts`, เทสต์ใน `test/auth.test.ts` และแก้ config ลง repo โดยตรง เลือก scrypt และวิธีสร้าง admin จาก env | ตรวจโค้ดและ commit |
 | API 1: Booking | เขียน `src/bookings/*`, `src/redis/lock.ts` และ `test/bookings.test.ts` ลง repo โดยตรง กำหนดขีดจำกัดการจองและให้ API ทำงานต่อเมื่อ Redis ล่ม | ตรวจโค้ดและ commit |
+| API 2: Pricing | เขียน `src/pricing/*`, `src/bookings/schemas.ts`, `src/db/transaction.ts`, `test/pricing.test.ts` และปรับ `POST /bookings` ลง repo โดยตรง เลือกวิธีปัดเศษ การล็อกประเภทห้อง และนิยาม "การพักที่เสร็จแล้ว" | ตรวจโค้ดและ commit |
 | README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |
 
 ### สิ่งที่ AI ทำผิดและวิธีแก้
