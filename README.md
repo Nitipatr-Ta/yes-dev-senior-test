@@ -154,7 +154,7 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 `POST /bookings` กัน Overbooking สองชั้น (`src/bookings/routes.ts`)
 
 1. **Redis distributed lock ต่อห้อง** (`src/redis/lock.ts`) ใช้ `SET NX PX` อายุ 5 วินาที พร้อม token สุ่ม และปลดล็อกด้วย Lua ที่ตรวจ token ก่อนลบ คำขอที่แย่งล็อกไม่ได้ถูกปฏิเสธทันทีด้วย 409 `ROOM_BUSY` และ header `Retry-After: 1` โดยไม่แตะฐานข้อมูลส่วนการจอง ชั้นนี้มีไว้ลดภาระฐานข้อมูล ไม่ได้รับประกันความถูกต้อง
-2. **PostgreSQL exclusion constraint** `bookings_no_overlap` เป็นตัวรับประกันความถูกต้อง โค้ด `INSERT` ตรง ๆ โดยไม่ตรวจห้องว่างก่อน ถ้าช่วงวันทับกับการจองที่ยืนยันแล้ว ฐานข้อมูลตอบ error `23P01` ซึ่ง API แปลงเป็น 409 `ROOM_UNAVAILABLE` จึงไม่มีช่วงเวลาระหว่าง "ตรวจ" กับ "บันทึก" ให้คำขออื่นแทรก
+2. **PostgreSQL exclusion constraint** `bookings_no_overlap` เป็นตัวรับประกันความถูกต้อง ใน transaction เดียวกัน โค้ดตรวจห้องว่างก่อนเพื่อคำนวณราคาและตอบ 409 `ROOM_UNAVAILABLE` ได้เร็ว แต่ไม่ได้อาศัยการตรวจนั้นกันจองซ้อน ถ้าคำขออื่นแทรกเข้ามาระหว่าง "ตรวจ" กับ "บันทึก" คำสั่ง `INSERT` จะชน constraint ฐานข้อมูลตอบ error `23P01` ซึ่ง API แปลงเป็น 409 `ROOM_UNAVAILABLE` เช่นกัน
 
 กรณีที่ชั้นแรกใช้ไม่ได้
 
