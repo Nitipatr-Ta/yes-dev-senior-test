@@ -24,7 +24,9 @@ API จะเปิดที่ `http://localhost:3000` ตรวจสถาน
 
 เมื่อ API เริ่มทำงานจะรันไฟล์ใน `migrations/` ตามลำดับชื่อโดยอัตโนมัติ (สร้างตารางและข้อมูลห้องตั้งต้น) และบันทึกไฟล์ที่รันแล้วไว้ในตาราง `schema_migrations`
 
-ค่าเริ่มต้นใน `docker-compose.yml` ใช้สำหรับ local development เท่านั้น หากต้องการเปลี่ยนพอร์ตหรือรหัสผ่านฐานข้อมูล ให้คัดลอก `.env.example` เป็น `.env` แล้วแก้ค่า
+ค่าเริ่มต้นใน `docker-compose.yml` ใช้สำหรับ local development เท่านั้น หากต้องการเปลี่ยนพอร์ต รหัสผ่านฐานข้อมูล `JWT_SECRET` หรือบัญชี admin ให้คัดลอก `.env.example` เป็น `.env` แล้วแก้ค่า
+
+เมื่อเริ่มทำงาน API จะสร้างบัญชี admin จาก `ADMIN_EMAIL` และ `ADMIN_PASSWORD` หากยังไม่มีผู้ใช้อีเมลนั้น ค่าเริ่มต้นคือ `admin@example.com` / `admin_local_dev`
 
 PostgreSQL ตั้งรหัสผ่านเฉพาะตอนสร้าง volume ครั้งแรก หากเปลี่ยน `POSTGRES_PASSWORD` หลังจากรันไปแล้ว API จะต่อฐานข้อมูลไม่ได้ (error `28P01`) ให้ลบ volume แล้วรันใหม่
 
@@ -48,7 +50,7 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 |---|---|
 | โครงโปรเจกต์, Docker Compose, health check | เสร็จ |
 | Database schema และ index สำหรับ date overlap | เสร็จ |
-| Authentication (JWT) และ input validation | ยังไม่เริ่ม |
+| Authentication (JWT) และ input validation | เสร็จ |
 | API 1: High-Concurrency Booking | ยังไม่เริ่ม |
 | API 2: Dynamic Pricing Engine | ยังไม่เริ่ม |
 | API 3: Booking Dashboard (WebSocket) | ยังไม่เริ่ม |
@@ -87,6 +89,23 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 
 ข้อมูลตั้งต้นใน `migrations/002_seed.sql` คือประเภทห้อง "The Royal Hideaway" ราคา 20,000 บาท และห้อง 1 หลัง
 
+### Authentication และ input validation (ทำแล้ว)
+
+| Endpoint | หน้าที่ |
+|---|---|
+| `POST /auth/register` | สมัครสมาชิกด้วย `email` และ `password` (8–128 ตัวอักษร) ได้ role `user` เสมอ |
+| `POST /auth/login` | เข้าสู่ระบบ คืน `accessToken` |
+| `GET /auth/me` | ข้อมูลผู้ใช้ของ token ที่ส่งมา |
+
+- Endpoint ที่ต้องยืนยันตัวตนรับ header `Authorization: Bearer <accessToken>` โดยใช้ preHandler `app.authenticate` หรือ `app.requireAdmin` (`src/auth/plugin.ts`)
+- Token เป็น JWT แบบ HS256 อายุ 1 ชั่วโมง (`JWT_EXPIRES_IN` หน่วยวินาที) เก็บ `sub` (user id) และ `role` ฝั่งตรวจรับเฉพาะ HS256
+- รหัสผ่าน hash ด้วย scrypt จาก `node:crypto` พร้อม salt แยกต่อผู้ใช้ และเทียบด้วย `timingSafeEqual` (`src/auth/password.ts`)
+- Login ตอบ 401 ข้อความเดียวกันทั้งกรณีรหัสผ่านผิดและไม่มีอีเมล และรัน scrypt ทั้งสองกรณี เพื่อไม่ให้เดาได้ว่าอีเมลใดมีในระบบ
+- ทุก endpoint ตรวจ body ด้วย zod แบบ strict ฟิลด์ที่ไม่รู้จัก (เช่น `role`) ถูกปฏิเสธด้วย 400 อีเมลถูกแปลงเป็นตัวพิมพ์เล็กก่อนบันทึก
+- Error ทุกแบบตอบเป็น `{ "error": { "code", "message" } }` error ที่ไม่ได้คาดไว้ตอบ 500 โดยไม่เปิดเผยรายละเอียด (`src/errors.ts`)
+
+ข้อจำกัด: role อยู่ใน token จึงมีผลจนกว่า token หมดอายุ ยังไม่มี refresh token และการเพิกถอน token
+
 > หัวข้อถัดจากนี้คือการออกแบบที่วางไว้ ยังไม่มีโค้ด จะปรับให้ตรงกับโค้ดจริงเมื่อแต่ละส่วนเสร็จ
 
 ### กัน Overbooking
@@ -106,7 +125,7 @@ WebSocket สำหรับ admin โดยกระจาย event การ�
 
 ### Rate limiting และ Security
 
-Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ ยืนยันตัวตนด้วย JWT และตรวจ input ทุก endpoint ด้วย zod
+Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ รวมถึง `POST /auth/login` เพื่อกันการเดารหัสผ่าน
 
 ## สมมติฐาน
 
@@ -130,6 +149,7 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 | วางแผน | เสนอ stack แนวทางกัน Overbooking และรายการสมมติฐาน | เลือก stack และวิธีรวมกฎราคา |
 | โครงโปรเจกต์ | เขียนไฟล์ใน `src/`, `Dockerfile`, `docker-compose.yml`, ไฟล์ตั้งค่า และเทสต์ health check ลง repo โดยตรง | ตรวจไฟล์และ commit |
 | Database schema และ migration | ออกแบบ schema และให้เนื้อหา `migrations/*.sql`, `src/db/migrate.ts` พร้อมคำอธิบาย | พิมพ์โค้ดเองทีละไฟล์ แก้ `src/server.ts` และ `Dockerfile` รัน container ตรวจ log และ commit |
+| Authentication | เขียน `src/auth/*`, `src/errors.ts`, เทสต์ใน `test/auth.test.ts` และแก้ config ลง repo โดยตรง เลือก scrypt และวิธีสร้าง admin จาก env | ตรวจโค้ดและ commit |
 | README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |
 
 ### สิ่งที่ AI ทำผิดและวิธีแก้

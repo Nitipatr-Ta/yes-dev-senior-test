@@ -7,6 +7,10 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-booking}:${POSTGRES_PASSWORD:-booking_local_dev}@postgres:5432/${POSTGRES_DB:-booking}
       REDIS_URL: redis://redis:6379
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      JWT_SECRET: ${JWT_SECRET:-local_dev_only_jwt_secret_change_me_0123456789}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-3600}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin_local_dev}
     ports:
       - "${API_PORT:-3000}:3000"
     depends_on:

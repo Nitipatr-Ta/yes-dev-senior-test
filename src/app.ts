@@ -1,7 +1,10 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Redis } from 'ioredis';
 import pg from 'pg';
+import { registerAuth } from './auth/plugin.js';
+import { authRoutes } from './auth/routes.js';
 import type { Config } from './config.js';
+import { registerErrorHandler } from './errors.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -26,6 +29,10 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
   app.addHook('onClose', async () => {
     await Promise.allSettled([db.end(), redis.quit()]);
   });
+
+  registerErrorHandler(app);
+  await registerAuth(app);
+  await app.register(authRoutes);
 
   app.get('/health', async (_request, reply) => {
     const [database, cache] = await Promise.allSettled([db.query('SELECT 1'), redis.ping()]);

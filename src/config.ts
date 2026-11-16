@@ -7,6 +7,15 @@ const envSchema = z.object({
   DATABASE_URL: z.string().url(),
   REDIS_URL: z.string().url(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  JWT_SECRET: z.string().min(32, 'must be at least 32 characters'),
+  JWT_EXPIRES_IN: z.coerce.number().int().positive().default(3600),
+  ADMIN_EMAIL: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .pipe(z.email())
+    .optional(),
+  ADMIN_PASSWORD: z.string().min(8).optional(),
 });
 
 export type Config = z.infer<typeof envSchema>;
