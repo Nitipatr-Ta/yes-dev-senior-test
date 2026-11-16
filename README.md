@@ -22,11 +22,20 @@ docker-compose up --build
 
 API จะเปิดที่ `http://localhost:3000` ตรวจสถานะได้ที่ `GET /health`
 
+เมื่อ API เริ่มทำงานจะรันไฟล์ใน `migrations/` ตามลำดับชื่อโดยอัตโนมัติ (สร้างตารางและข้อมูลห้องตั้งต้น) และบันทึกไฟล์ที่รันแล้วไว้ในตาราง `schema_migrations`
+
 ค่าเริ่มต้นใน `docker-compose.yml` ใช้สำหรับ local development เท่านั้น หากต้องการเปลี่ยนพอร์ตหรือรหัสผ่านฐานข้อมูล ให้คัดลอก `.env.example` เป็น `.env` แล้วแก้ค่า
+
+PostgreSQL ตั้งรหัสผ่านเฉพาะตอนสร้าง volume ครั้งแรก หากเปลี่ยน `POSTGRES_PASSWORD` หลังจากรันไปแล้ว API จะต่อฐานข้อมูลไม่ได้ (error `28P01`) ให้ลบ volume แล้วรันใหม่
+
+```bash
+docker-compose down -v
+docker-compose up --build
+```
 
 ### รันเทสต์
 
-เทสต์ต่อกับ PostgreSQL และ Redis จริง จึงต้องเปิด container ไว้ก่อน
+เทสต์ต่อกับ PostgreSQL และ Redis จริง จึงต้องเปิด container ไว้ก่อน รหัสผ่านใน `DATABASE_URL` ต้องตรงกับที่ container ใช้ (`booking_local_dev` เมื่อไม่มีไฟล์ `.env`)
 
 ```bash
 npm install
@@ -38,7 +47,7 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 | ส่วน | สถานะ |
 |---|---|
 | โครงโปรเจกต์, Docker Compose, health check | เสร็จ |
-| Database schema และ index สำหรับ date overlap | ยังไม่เริ่ม |
+| Database schema และ index สำหรับ date overlap | เสร็จ |
 | Authentication (JWT) และ input validation | ยังไม่เริ่ม |
 | API 1: High-Concurrency Booking | ยังไม่เริ่ม |
 | API 2: Dynamic Pricing Engine | ยังไม่เริ่ม |
@@ -49,16 +58,43 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 
 ## แนวทางแก้ปัญหา
 
-> ส่วนนี้คือการออกแบบที่วางไว้ จะปรับให้ตรงกับโค้ดจริงเมื่อแต่ละส่วนเสร็จ
+### Database schema (ทำแล้ว)
+
+นิยามอยู่ใน `migrations/001_init.sql`
+
+| ตาราง | เก็บอะไร |
+|---|---|
+| `users` | ผู้ใช้ อีเมล (unique) รหัสผ่านแบบ hash และ role (`user`, `admin`) |
+| `room_types` | ประเภทห้องและราคาตั้งต้น หน่วยสตางค์ |
+| `rooms` | ห้องแต่ละหลัง อ้างถึงประเภทห้อง |
+| `bookings` | การจอง ช่วงวัน สถานะ ราคาที่คิด และกฎราคาที่ใช้ |
+
+ตาราง `bookings` มี constraint สองตัวที่เกี่ยวกับช่วงวัน
+
+```sql
+CONSTRAINT bookings_valid_range CHECK (check_in < check_out),
+CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
+  room_id WITH =,
+  daterange(check_in, check_out, '[)') WITH &&
+) WHERE (status = 'confirmed')
+```
+
+- `bookings_no_overlap` ห้ามมีสองแถวที่ห้องเดียวกันและช่วงวันทับกัน ฐานข้อมูลบังคับกฎนี้เองในระดับ transaction จึงไม่ขึ้นกับลำดับการทำงานของโค้ดฝั่ง API
+- ช่วงวันเป็นแบบ `[)` นับวัน check-in ไม่นับวัน check-out
+- เงื่อนไข `WHERE (status = 'confirmed')` ทำให้การจองที่ยกเลิกแล้วไม่กันวัน
+- Constraint นี้สร้าง GiST index บน `(room_id, daterange)` ซึ่งใช้ค้นหาช่วงวันที่ว่างด้วยตัวดำเนินการ `&&` ได้ ส่วน extension `btree_gist` ทำให้ GiST เทียบ `room_id` ด้วย `=` ได้
+- เงินเก็บเป็น `BIGINT` หน่วยสตางค์
+
+ข้อมูลตั้งต้นใน `migrations/002_seed.sql` คือประเภทห้อง "The Royal Hideaway" ราคา 20,000 บาท และห้อง 1 หลัง
+
+> หัวข้อถัดจากนี้คือการออกแบบที่วางไว้ ยังไม่มีโค้ด จะปรับให้ตรงกับโค้ดจริงเมื่อแต่ละส่วนเสร็จ
 
 ### กัน Overbooking
 
 ใช้สองชั้น
 
 1. **Redis distributed lock ต่อห้อง** (`SET NX PX` พร้อม token และปลดล็อกด้วย Lua ที่ตรวจ token) คำขอที่แย่งล็อกไม่ได้จะถูกปฏิเสธทันที ลดภาระที่ฐานข้อมูลเมื่อมีคำขอเข้ามาพร้อมกันจำนวนมาก
-2. **PostgreSQL exclusion constraint** บนช่วงวัน `daterange(check_in, check_out, '[)')` ด้วย GiST index ฐานข้อมูลจะปฏิเสธแถวที่ช่วงวันซ้อนกับการจองที่ยังมีผลในห้องเดียวกัน ชั้นนี้เป็นตัวรับประกันความถูกต้อง แม้ Redis lock หมดอายุกลางทางหรือ Redis ล่ม
-
-GiST index เดียวกันใช้ค้นหาช่วงวันที่ว่างด้วย
+2. **PostgreSQL exclusion constraint** `bookings_no_overlap` ข้างต้น ชั้นนี้เป็นตัวรับประกันความถูกต้อง แม้ Redis lock หมดอายุกลางทางหรือ Redis ล่ม
 
 ### Dynamic Pricing
 
@@ -85,16 +121,22 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 
 ## การใช้ AI
 
-ใช้ Claude Code (Claude Fable 5.2) ช่วยวางแผนและเขียนโค้ด โดยทำทีละส่วนและตรวจ diff ก่อน commit
+ใช้ Claude Code (Claude Fable 5.2) ช่วยวางแผนและเขียนโค้ด โดยทำทีละส่วน
 
 ### ส่วนที่ใช้ AI
 
-| ส่วน | สิ่งที่ AI ทำ |
-|---|---|
-| วางแผน | เสนอ stack แนวทางกัน Overbooking และรายการสมมติฐาน |
-| โครงโปรเจกต์ | เขียน `src/`, `Dockerfile`, `docker-compose.yml`, ไฟล์ตั้งค่า และเทสต์ health check |
-| README | ร่างเอกสารฉบับนี้ |
+| ส่วน | สิ่งที่ AI ทำ | สิ่งที่ทำเอง |
+|---|---|---|
+| วางแผน | เสนอ stack แนวทางกัน Overbooking และรายการสมมติฐาน | เลือก stack และวิธีรวมกฎราคา |
+| โครงโปรเจกต์ | เขียนไฟล์ใน `src/`, `Dockerfile`, `docker-compose.yml`, ไฟล์ตั้งค่า และเทสต์ health check ลง repo โดยตรง | ตรวจไฟล์และ commit |
+| Database schema และ migration | ออกแบบ schema และให้เนื้อหา `migrations/*.sql`, `src/db/migrate.ts` พร้อมคำอธิบาย | พิมพ์โค้ดเองทีละไฟล์ แก้ `src/server.ts` และ `Dockerfile` รัน container ตรวจ log และ commit |
+| README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |
 
-### สิ่งที่ตรวจทานและแก้ไข
+### สิ่งที่ AI ทำผิดและวิธีแก้
 
-ยังไม่มีรายการ
+**1. รหัสผ่านฐานข้อมูลใน `docker-compose.yml` กับ `.env.example` ไม่ตรงกัน**
+
+- สิ่งที่ AI ทำ: ตั้งค่า default ของ `POSTGRES_PASSWORD` ใน `docker-compose.yml` เป็นค่าหนึ่ง แต่ใส่อีกค่าหนึ่งใน `.env.example` และไม่ได้ระบุว่า PostgreSQL ตั้งรหัสผ่านเฉพาะตอนสร้าง volume ครั้งแรก
+- ผลที่เกิด: รัน stack ครั้งแรกโดยไม่มี `.env` แล้วสร้าง `.env` จาก `.env.example` ภายหลัง เมื่อ build ใหม่ API ส่งรหัสผ่านใหม่ไปยังฐานข้อมูลที่ยังใช้รหัสเดิม จึงเริ่มทำงานไม่ได้ด้วย error `28P01` (password authentication failed)
+- วิธีที่พบ: อ่าน log ของ container `api` แล้วเทียบเวลาที่สร้าง `.env` กับเวลาที่สร้าง volume
+- วิธีแก้: ลบ volume ด้วย `docker-compose down -v` แล้วรันใหม่ และเพิ่มขั้นตอนนี้ไว้ในหัวข้อวิธีติดตั้งและรัน
