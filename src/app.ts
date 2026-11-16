@@ -1,3 +1,4 @@
+import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance } from 'fastify';
 import { Redis } from 'ioredis';
 import pg from 'pg';
@@ -5,6 +6,7 @@ import { registerAuth } from './auth/plugin.js';
 import { authRoutes } from './auth/routes.js';
 import { bookingRoutes } from './bookings/routes.js';
 import type { Config } from './config.js';
+import { dashboardRoutes, type DashboardOptions } from './dashboard/routes.js';
 import { registerErrorHandler } from './errors.js';
 import { pricingRoutes } from './pricing/routes.js';
 
@@ -20,6 +22,7 @@ declare module 'fastify' {
 
 export interface AppOptions {
   now?: () => Date;
+  dashboard?: DashboardOptions;
 }
 
 export async function buildApp(
@@ -43,10 +46,14 @@ export async function buildApp(
   });
 
   registerErrorHandler(app);
+  // Registered before any route: it wraps routes as they are added.
+  // Dashboard clients only send small control messages.
+  await app.register(fastifyWebsocket, { options: { maxPayload: 8 * 1024 } });
   await registerAuth(app);
   await app.register(authRoutes);
   await app.register(bookingRoutes);
   await app.register(pricingRoutes);
+  await app.register(dashboardRoutes, options.dashboard ?? {});
 
   app.get('/health', async (_request, reply) => {
     const [database, cache] = await Promise.allSettled([db.query('SELECT 1'), redis.ping()]);

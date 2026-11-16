@@ -1,10 +1,12 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { publishBookingEvent } from '../dashboard/events.js';
 import { withTransaction } from '../db/transaction.js';
 import { HttpError } from '../errors.js';
 import { quoteStay } from '../pricing/quote.js';
 import { acquireLock, releaseLock, type Lock } from '../redis/lock.js';
 import { resortToday } from './dates.js';
+import { BOOKING_COLUMNS, toBooking, type BookingRow } from './model.js';
 import { calendarDate, idSchema, makeStayCheck, stayFields } from './schemas.js';
 
 const PG_FOREIGN_KEY_VIOLATION = '23503';
@@ -14,37 +16,6 @@ const ROOM_LOCK_TTL_MS = 5_000;
 export const roomLockKey = (roomId: string) => `lock:room:${roomId}`;
 
 const bookingParams = z.strictObject({ id: idSchema });
-
-interface BookingRow {
-  id: string;
-  room_id: string;
-  user_id: string;
-  check_in: string;
-  check_out: string;
-  status: 'confirmed' | 'cancelled';
-  nightly_price_satang: string;
-  total_price_satang: string;
-  price_rules: unknown;
-  created_at: Date;
-}
-
-const BOOKING_COLUMNS = `id, room_id, user_id, check_in::text, check_out::text, status,
-  nightly_price_satang, total_price_satang, price_rules, created_at`;
-
-function toBooking(row: BookingRow) {
-  return {
-    id: row.id,
-    roomId: row.room_id,
-    userId: row.user_id,
-    checkIn: row.check_in,
-    checkOut: row.check_out,
-    status: row.status,
-    nightlyPriceSatang: Number(row.nightly_price_satang),
-    totalPriceSatang: Number(row.total_price_satang),
-    priceRules: row.price_rules,
-    createdAt: row.created_at.toISOString(),
-  };
-}
 
 function pgErrorCode(error: unknown): string | undefined {
   if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
@@ -166,9 +137,11 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
         );
         const row = inserted.rows[0];
         if (!row) throw new Error('INSERT INTO bookings returned no row');
-        return row;
+        return toBooking(row);
       });
-      return await reply.code(201).send({ booking: toBooking(booking) });
+      // Published only after the commit, so the dashboard never shows a booking that rolled back.
+      publishBookingEvent(app, 'booking.created', booking);
+      return await reply.code(201).send({ booking });
     } catch (error) {
       const code = pgErrorCode(error);
       if (code === PG_EXCLUSION_VIOLATION) {
@@ -219,14 +192,23 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
   app.post('/bookings/:id/cancel', { preHandler: app.authenticate }, async (request) => {
     const params = bookingParams.parse(request.params);
     const scope = visibleTo(request.user.sub, request.user.role);
-    // Cancelling twice is harmless: the row is returned as cancelled either way.
-    const result = await app.db.query<BookingRow>(
-      `UPDATE bookings SET status = 'cancelled' WHERE id = $1 ${scope.clause}
-       RETURNING ${BOOKING_COLUMNS}`,
+    // Cancelling twice is harmless: the row is returned as cancelled either way. The row lock
+    // makes previous_status exact, so only the request that actually cancels emits an event.
+    const result = await app.db.query<BookingRow & { previous_status: BookingRow['status'] }>(
+      `WITH target AS (
+         SELECT id AS target_id, status AS previous_status
+         FROM bookings WHERE id = $1 ${scope.clause}
+         FOR UPDATE
+       )
+       UPDATE bookings SET status = 'cancelled'
+       FROM target WHERE bookings.id = target.target_id
+       RETURNING ${BOOKING_COLUMNS}, target.previous_status`,
       [params.id, ...scope.values],
     );
-    const booking = result.rows[0];
-    if (!booking) throw new HttpError(404, 'BOOKING_NOT_FOUND', 'Booking not found');
-    return { booking: toBooking(booking) };
+    const row = result.rows[0];
+    if (!row) throw new HttpError(404, 'BOOKING_NOT_FOUND', 'Booking not found');
+    const booking = toBooking(row);
+    if (row.previous_status === 'confirmed') publishBookingEvent(app, 'booking.cancelled', booking);
+    return { booking };
   });
 }

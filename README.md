@@ -53,7 +53,7 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 | Authentication (JWT) และ input validation | เสร็จ |
 | API 1: High-Concurrency Booking | เสร็จ |
 | API 2: Dynamic Pricing Engine | เสร็จ |
-| API 3: Booking Dashboard (WebSocket) | ยังไม่เริ่ม |
+| API 3: Booking Dashboard (WebSocket) | เสร็จ |
 | Redis rate limiting | ยังไม่เริ่ม |
 | Concurrency test | มีใน `test/bookings.test.ts` แล้ว ยังไม่มี load test แยก |
 | Postman collection (`/postman`) | ยังไม่เริ่ม |
@@ -176,11 +176,41 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 
 เวลาปัจจุบันมาจาก `app.now()` ซึ่งเทสต์แทนค่าได้ เทสต์ใน `test/pricing.test.ts` ครอบคลุมขอบเวลา 19:59:59, 20:00:00, 21:59:59 และ 22:00:00 การรวมทุกคู่ของกฎ การปัดเศษ และการจองสองห้องสุดท้ายพร้อมกัน 10 รอบ
 
+### API 3: Booking Dashboard (ทำแล้ว)
+
+| Endpoint | สิทธิ์ | หน้าที่ |
+|---|---|---|
+| `GET /admin/dashboard` | admin | snapshot ของ dashboard ผ่าน HTTP |
+| `GET /admin/dashboard/ws` (WebSocket) | admin | snapshot ตอนเชื่อมต่อ แล้วส่ง event การจองแบบ real-time |
+
+**การยืนยันตัวตนของ WebSocket** มีสองทาง
+
+1. ส่ง header `Authorization: Bearer <token>` ตอนเชื่อมต่อ (Postman, ฝั่ง server) ถ้า token ไม่ใช่ admin จะถูกปฏิเสธก่อน upgrade ด้วย HTTP 401 หรือ 403
+2. เชื่อมต่อโดยไม่มี header แล้วส่งข้อความแรกเป็น `{"type":"auth","token":"<token>"}` ภายใน 5 วินาที สำหรับ browser ซึ่งตั้ง header ของ WebSocket ไม่ได้
+
+ไม่รับ token ใน URL เพราะจะไปอยู่ใน access log ถ้ายืนยันตัวตนไม่ผ่าน socket ถูกปิดด้วย code `4401` (token ใช้ไม่ได้ หมดเวลา หรือข้อความแรกไม่ใช่ `auth`) หรือ `4403` (ไม่ใช่ admin) และเมื่อ token หมดอายุ socket ที่เปิดด้วย token นั้นถูกปิดด้วย `4401`
+
+**ข้อความจาก server**
+
+| `type` | เนื้อหา | เมื่อใด |
+|---|---|---|
+| `snapshot` | `data`: `summary` (จำนวนห้อง ห้องที่มีคนพักคืนนี้ check-in/check-out วันนี้ การจองที่ยังไม่ check-out การจองที่ยกเลิก รายได้รวมของการจองที่ยืนยันแล้ว) และ `recentBookings` 20 รายการล่าสุด | หลังยืนยันตัวตน และเมื่อ client ส่ง `{"type":"snapshot"}` |
+| `booking.created` | `booking`, `occurredAt` | หลัง transaction ของการจอง commit แล้ว |
+| `booking.cancelled` | `booking`, `occurredAt` | เมื่อการจองเปลี่ยนจาก confirmed เป็น cancelled การยกเลิกซ้ำไม่ส่ง event |
+| `error` | `error.code` | client ส่งข้อความที่ไม่รู้จัก |
+
+**การกระจาย event** (`src/dashboard/`)
+
+- `POST /bookings` และการยกเลิก `PUBLISH` event ไปที่ Redis channel `dashboard:booking-events` หลัง commit แบบไม่รอผล ถ้า Redis ล่ม การจองยังสำเร็จ dashboard แค่พลาด event นั้นและเห็นใน snapshot ครั้งถัดไป
+- API ทุก instance `SUBSCRIBE` channel นี้ด้วย Redis connection แยก แล้วส่งต่อให้ socket ที่เชื่อมกับ instance ตัวเอง จึงขยายเป็นหลาย instance ได้
+- Event ที่มาถึงระหว่างโหลด snapshot ถูกพักไว้แล้วส่งตามหลัง snapshot จึงไม่หาย แต่ event นั้นอาจซ้ำกับข้อมูลใน snapshot client ควรใช้ `booking.id` และ `status` ล่าสุดเป็นหลัก
+- Server ส่ง ping ทุก 30 วินาที และตัด client ที่ไม่ตอบ client ที่รับข้อความไม่ทันจน buffer เกิน 1 MB ก็ถูกตัด ข้อความจาก client จำกัดขนาด 8 KB
+
+ข้อจำกัด: Redis Pub/Sub ไม่เก็บ event ย้อนหลัง client ที่หลุดแล้วเชื่อมใหม่ต้องใช้ snapshot ที่ได้ตอนเชื่อมต่อแทน event ที่พลาดไป
+
+เทสต์ใน `test/dashboard.test.ts` ครอบคลุมการยืนยันตัวตนทั้งสองทาง การปิด socket เมื่อ token หมดอายุ การยิงจอง 50 คำขอพร้อมกันแล้วได้ event เดียว และการส่ง event จาก API instance อื่นผ่าน Redis
+
 > หัวข้อถัดจากนี้คือการออกแบบที่วางไว้ ยังไม่มีโค้ด จะปรับให้ตรงกับโค้ดจริงเมื่อแต่ละส่วนเสร็จ
-
-### Dashboard
-
-WebSocket สำหรับ admin โดยกระจาย event การจองผ่าน Redis Pub/Sub
 
 ### Rate limiting และ Security
 
@@ -198,6 +228,7 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 | ขีดจำกัดการจอง | พักได้ไม่เกิน 30 คืน จองล่วงหน้าได้ไม่เกิน 365 วัน และ check-in ต้องไม่ใช่วันในอดีตตามเขตเวลา Asia/Bangkok | กันการจองที่ผิดปกติและจำกัดขนาดข้อมูล |
 | การยกเลิก | เจ้าของหรือ admin ยกเลิกได้ทุกเมื่อ ไม่มีค่าปรับ | โจทย์ไม่ระบุนโยบายยกเลิก |
 | ช่วงวันที่จอง | `[check_in, check_out)` วัน check-out ของคนหนึ่งเป็นวัน check-in ของอีกคนได้ | ตรงกับการใช้งานจริงของโรงแรม |
+| Dashboard แสดงอะไร | snapshot สรุปจำนวนและรายได้ พร้อมการจองล่าสุด แล้วส่ง event เมื่อมีการจองหรือยกเลิก | โจทย์ระบุเพียง dashboard แบบ real-time ข้อมูลเหล่านี้คือสิ่งที่ผู้ดูแลรีสอร์ทต้องเห็นทันที |
 
 ## การใช้ AI
 
@@ -213,6 +244,7 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 | Authentication | เขียน `src/auth/*`, `src/errors.ts`, เทสต์ใน `test/auth.test.ts` และแก้ config ลง repo โดยตรง เลือก scrypt และวิธีสร้าง admin จาก env | ตรวจโค้ดและ commit |
 | API 1: Booking | เขียน `src/bookings/*`, `src/redis/lock.ts` และ `test/bookings.test.ts` ลง repo โดยตรง กำหนดขีดจำกัดการจองและให้ API ทำงานต่อเมื่อ Redis ล่ม | ตรวจโค้ดและ commit |
 | API 2: Pricing | เขียน `src/pricing/*`, `src/bookings/schemas.ts`, `src/db/transaction.ts`, `test/pricing.test.ts` และปรับ `POST /bookings` ลง repo โดยตรง เลือกวิธีปัดเศษ การล็อกประเภทห้อง และนิยาม "การพักที่เสร็จแล้ว" | ตรวจโค้ดและ commit |
+| API 3: Dashboard | เขียน `src/dashboard/*`, `src/bookings/model.ts`, `test/dashboard.test.ts` และปรับ `POST /bookings` กับการยกเลิกให้ส่ง event ลง repo โดยตรง เลือกวิธียืนยันตัวตนของ WebSocket และเนื้อหา snapshot | ตรวจโค้ดและ commit |
 | README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |
 
 ### สิ่งที่ AI ทำผิดและวิธีแก้

@@ -13,7 +13,8 @@ export interface AuthUser {
 declare module '@fastify/jwt' {
   interface FastifyJWT {
     payload: AuthUser;
-    user: AuthUser;
+    /** A verified token: the signed claims plus the times @fastify/jwt adds. */
+    user: AuthUser & { iat?: number; exp?: number };
   }
 }
 
