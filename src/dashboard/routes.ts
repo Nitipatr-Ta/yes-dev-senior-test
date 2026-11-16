@@ -43,15 +43,18 @@ export async function dashboardRoutes(
   const hub = new DashboardHub(app.log);
 
   // A connection in subscriber mode cannot run other commands, so it gets its own.
-  const subscriber = app.redis.duplicate();
+  const subscriber = app.redis.duplicate({ maxRetriesPerRequest: null });
   subscriber.on('error', (error) => app.log.warn({ err: error }, 'dashboard subscriber error'));
   subscriber.on('message', (_channel, message) => hub.broadcast(message));
-  await subscriber.subscribe(BOOKING_EVENTS_CHANNEL);
+  subscriber.subscribe(BOOKING_EVENTS_CHANNEL).catch((error: unknown) => {
+    app.log.error({ err: error }, 'failed to subscribe to booking events channel');
+  });
+
   hub.startHeartbeat(HEARTBEAT_INTERVAL_MS);
 
   app.addHook('onClose', async () => {
     hub.close();
-    await subscriber.quit().catch(() => undefined);
+    subscriber.disconnect();
   });
 
   app.get('/admin/dashboard', { preHandler: app.requireAdmin }, async () =>

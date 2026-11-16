@@ -231,7 +231,7 @@ describe('booking dashboard', () => {
     });
 
     it('closes the socket when the token expires', async () => {
-      const shortLived = app.jwt.sign({ sub: guest.id, role: 'admin' }, { expiresIn: 1 });
+      const shortLived = app.jwt.sign({ sub: guest.id, role: 'admin' }, { expiresIn: 2 });
       const { inbox } = await connect({ authorization: `Bearer ${shortLived}` });
 
       expect(await inbox.closed).toEqual({ code: CLOSE_UNAUTHORIZED, reason: 'Token expired' });
