@@ -83,7 +83,12 @@ export async function bookingRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.post('/bookings', { preHandler: app.authenticate }, async (request, reply) => {
+  // Runs after authentication, so the key is the verified user id and not something forgeable.
+  const bookingLimit = app.rateLimit('booking', (request) => request.user.sub);
+
+  const bookingGuards = [app.authenticate, bookingLimit];
+
+  app.post('/bookings', { preHandler: bookingGuards }, async (request, reply) => {
     const body = createBookingBody.parse(request.body);
 
     // Layer 1: one request per room reaches the database at a time; the rest are turned away

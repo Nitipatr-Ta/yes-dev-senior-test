@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { HttpError } from '../errors.js';
+import { byIp, hashKey } from '../rate-limit/plugin.js';
 import { hashPassword, verifyPassword } from './password.js';
 import type { Role } from './plugin.js';
 
@@ -50,7 +51,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     expiresIn: app.config.JWT_EXPIRES_IN,
   });
 
-  app.post('/auth/register', async (request, reply) => {
+  const authLimit = app.rateLimit('auth', byIp);
+  // Keyed by the email being tried, so guessing one account's password from many IPs is
+  // still limited. A body that is not a valid login is left for validation to reject.
+  const loginEmailLimit = app.rateLimit('loginEmail', (request) => {
+    const parsed = loginBody.safeParse(request.body);
+    return parsed.success ? hashKey(parsed.data.email) : undefined;
+  });
+
+  app.post('/auth/register', { preHandler: authLimit }, async (request, reply) => {
     const body = registerBody.parse(request.body);
     const passwordHash = await hashPassword(body.password);
 
@@ -72,7 +81,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send({ user, ...issueToken(user) });
   });
 
-  app.post('/auth/login', async (request) => {
+  app.post('/auth/login', { preHandler: [authLimit, loginEmailLimit] }, async (request) => {
     const body = loginBody.parse(request.body);
     const result = await app.db.query<UserRow>(
       `SELECT id, email, password_hash, role FROM users WHERE email = $1`,

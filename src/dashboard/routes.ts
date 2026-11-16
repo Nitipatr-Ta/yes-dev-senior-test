@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { RawData, WebSocket } from 'ws';
 import { z } from 'zod';
 import type { AuthUser } from '../auth/plugin.js';
+import { byIp } from '../rate-limit/plugin.js';
 import { BOOKING_EVENTS_CHANNEL } from './events.js';
 import { DashboardHub } from './hub.js';
 import { loadDashboardSnapshot } from './snapshot.js';
@@ -71,7 +72,9 @@ export async function dashboardRoutes(
 
   app.get(
     '/admin/dashboard/ws',
-    { websocket: true, preHandler: authenticateIfHeader },
+    // Limited per IP before the upgrade: an unauthenticated socket may stay open until the
+    // auth timeout, so the number a client can open has to be bounded.
+    { websocket: true, preHandler: [app.rateLimit('dashboardWs', byIp), authenticateIfHeader] },
     (socket: WebSocket, request) => {
       let user: AuthUser | null = null;
       let expiryTimer: NodeJS.Timeout | undefined;

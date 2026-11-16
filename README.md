@@ -24,7 +24,7 @@ API จะเปิดที่ `http://localhost:3000` ตรวจสถาน
 
 เมื่อ API เริ่มทำงานจะรันไฟล์ใน `migrations/` ตามลำดับชื่อโดยอัตโนมัติ (สร้างตารางและข้อมูลห้องตั้งต้น) และบันทึกไฟล์ที่รันแล้วไว้ในตาราง `schema_migrations`
 
-ค่าเริ่มต้นใน `docker-compose.yml` ใช้สำหรับ local development เท่านั้น หากต้องการเปลี่ยนพอร์ต รหัสผ่านฐานข้อมูล `JWT_SECRET` หรือบัญชี admin ให้คัดลอก `.env.example` เป็น `.env` แล้วแก้ค่า
+ค่าเริ่มต้นใน `docker-compose.yml` ใช้สำหรับ local development เท่านั้น หากต้องการเปลี่ยนพอร์ต รหัสผ่านฐานข้อมูล `JWT_SECRET` บัญชี admin หรือปิด rate limit (`RATE_LIMIT_ENABLED=false`) ให้คัดลอก `.env.example` เป็น `.env` แล้วแก้ค่า
 
 เมื่อเริ่มทำงาน API จะสร้างบัญชี admin จาก `ADMIN_EMAIL` และ `ADMIN_PASSWORD` หากยังไม่มีผู้ใช้อีเมลนั้น ค่าเริ่มต้นคือ `admin@example.com` / `admin_local_dev`
 
@@ -54,7 +54,7 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 | API 1: High-Concurrency Booking | เสร็จ |
 | API 2: Dynamic Pricing Engine | เสร็จ |
 | API 3: Booking Dashboard (WebSocket) | เสร็จ |
-| Redis rate limiting | ยังไม่เริ่ม |
+| Redis rate limiting | เสร็จ |
 | Concurrency test | มีใน `test/bookings.test.ts` แล้ว ยังไม่มี load test แยก |
 | Postman collection (`/postman`) | ยังไม่เริ่ม |
 
@@ -210,11 +210,31 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 
 เทสต์ใน `test/dashboard.test.ts` ครอบคลุมการยืนยันตัวตนทั้งสองทาง การปิด socket เมื่อ token หมดอายุ การยิงจอง 50 คำขอพร้อมกันแล้วได้ event เดียว และการส่ง event จาก API instance อื่นผ่าน Redis
 
-> หัวข้อถัดจากนี้คือการออกแบบที่วางไว้ ยังไม่มีโค้ด จะปรับให้ตรงกับโค้ดจริงเมื่อแต่ละส่วนเสร็จ
+### Redis rate limiting (ทำแล้ว)
 
-### Rate limiting และ Security
+| กฎ | ใช้กับ | นับตาม | ขีดจำกัดต่อ 1 นาที |
+|---|---|---|---|
+| `global` | ทุก request ยกเว้น `GET /health` | IP | 300 |
+| `auth` | `POST /auth/register`, `POST /auth/login` | IP | 20 |
+| `loginEmail` | `POST /auth/login` | email ที่พยายาม login | 10 |
+| `booking` | `POST /bookings` | ผู้ใช้ (จาก token ที่ตรวจแล้ว) | 30 |
+| `dashboardWs` | การเชื่อมต่อ WebSocket ของ dashboard | IP | 30 |
 
-Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ รวมถึง `POST /auth/login` เพื่อกันการเดารหัสผ่าน
+- **ตัวนับ** (`src/rate-limit/limiter.ts`) เป็น fixed window ใน Redis ใช้ Lua script เดียวทำ `INCR` และตั้งอายุ key จึง atomic คำขอพร้อมกัน 100 รายการที่ขีดจำกัด 10 ผ่าน 10 รายการพอดี
+- **เมื่อเกิน** ตอบ 429 code `RATE_LIMITED` พร้อม header `Retry-After` ทุก response ที่ผ่านตัวนับมี `X-RateLimit-Limit`, `X-RateLimit-Remaining` และ `X-RateLimit-Reset` (วินาที) ถ้า request เข้าหลายกฎ header รายงานกฎที่เหลือน้อยที่สุด
+- **ลำดับ** กฎ `global` ทำงานใน `onRequest` ก่อนอย่างอื่น ส่วนกฎ `booking` ทำงานหลังตรวจ token จึงนับตาม user id ที่ปลอมไม่ได้ และทั้งหมดทำงานก่อน Redis lock กับฐานข้อมูล
+- **กฎ `loginEmail`** นับตาม email (hash ก่อนใช้เป็น key) จึงจำกัดการเดารหัสผ่านของบัญชีเดียวจากหลาย IP ได้
+- **Redis ล่ม** ปล่อย request ผ่านโดยไม่จำกัด (fail open) และ log คำเตือน โดยตรวจสถานะ connection ก่อน จึงไม่ทำให้แต่ละ request ช้าลง
+- **IP ของ client** มาจาก socket โดยตรง header `X-Forwarded-For` ถูกเชื่อเฉพาะเมื่อตั้ง `TRUST_PROXY=true` ซึ่งควรตั้งเมื่ออยู่หลัง reverse proxy เท่านั้น ไม่อย่างนั้น client ปลอม header เพื่อหลบขีดจำกัดได้
+- **ปิดได้** ด้วย `RATE_LIMIT_ENABLED=false` สำหรับ load test ที่ยิงจากเครื่องเดียว
+
+ข้อจำกัด
+
+- Fixed window ยอมให้เกิด burst ได้สูงสุด 2 เท่าของขีดจำกัดตรงรอยต่อของสอง window
+- เมื่อรันด้วย Docker บนเครื่องเดียว ทุก request มาจาก IP ของ Docker gateway จึงใช้ตัวนับต่อ IP ร่วมกัน
+- กฎ `loginEmail` ทำให้ผู้อื่นกันเจ้าของบัญชี login ได้ชั่วคราว 1 นาทีต่อรอบ โดยยิง login ผิดซ้ำ ๆ เป็นข้อแลกเปลี่ยนกับการกันเดารหัสผ่าน
+
+เทสต์ใน `test/rate-limit.test.ts` ครอบคลุมทุกกฎ การแยกตัวนับตาม IP และผู้ใช้ การหมดอายุของ window การปลอม `X-Forwarded-For` และกรณี Redis ต่อไม่ได้ เทสต์ไฟล์อื่นปิด rate limit เพราะยิงจาก address เดียวกันหลายร้อยครั้งโดยตั้งใจ
 
 ## สมมติฐาน
 
@@ -244,7 +264,8 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 | Authentication | เขียน `src/auth/*`, `src/errors.ts`, เทสต์ใน `test/auth.test.ts` และแก้ config ลง repo โดยตรง เลือก scrypt และวิธีสร้าง admin จาก env | ตรวจโค้ดและ commit |
 | API 1: Booking | เขียน `src/bookings/*`, `src/redis/lock.ts` และ `test/bookings.test.ts` ลง repo โดยตรง กำหนดขีดจำกัดการจองและให้ API ทำงานต่อเมื่อ Redis ล่ม | ตรวจโค้ดและ commit |
 | API 2: Pricing | เขียน `src/pricing/*`, `src/bookings/schemas.ts`, `src/db/transaction.ts`, `test/pricing.test.ts` และปรับ `POST /bookings` ลง repo โดยตรง เลือกวิธีปัดเศษ การล็อกประเภทห้อง และนิยาม "การพักที่เสร็จแล้ว" | ตรวจโค้ดและ commit |
-| API 3: Dashboard | เขียน `src/dashboard/*`, `src/bookings/model.ts`, `test/dashboard.test.ts` และปรับ `POST /bookings` กับการยกเลิกให้ส่ง event ลง repo โดยตรง เลือกวิธียืนยันตัวตนของ WebSocket และเนื้อหา snapshot | ตรวจโค้ดและ commit |
+| API 3: Dashboard | เขียน `src/dashboard/*`, `src/bookings/model.ts`, `test/dashboard.test.ts` และปรับ `POST /bookings` กับการยกเลิกให้ส่ง event ลง repo โดยตรง เลือกวิธียืนยันตัวตนของ WebSocket และเนื้อหา snapshot | ตรวจโค้ดและ commit แก้การ subscribe และเทสต์ token หมดอายุด้วยตัวเองตามผลตรวจ |
+| Rate limiting | เขียน `src/rate-limit/*`, `test/rate-limit.test.ts` และต่อเข้ากับ route ลง repo โดยตรง เลือกแบบ fixed window ค่าขีดจำกัด และให้ปล่อยผ่านเมื่อ Redis ล่ม | ตรวจโค้ดและ commit |
 | README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |
 
 ### สิ่งที่ AI ทำผิดและวิธีแก้

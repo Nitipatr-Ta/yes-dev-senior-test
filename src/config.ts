@@ -1,5 +1,11 @@
 import { z } from 'zod';
 
+const booleanFlag = (defaultValue: 'true' | 'false') =>
+  z
+    .enum(['true', 'false'])
+    .default(defaultValue)
+    .transform((value) => value === 'true');
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('0.0.0.0'),
@@ -16,6 +22,12 @@ const envSchema = z.object({
     .pipe(z.email())
     .optional(),
   ADMIN_PASSWORD: z.string().min(8).optional(),
+  RATE_LIMIT_ENABLED: booleanFlag('true'),
+  /**
+   * Set to true only when the API runs behind a reverse proxy that sets X-Forwarded-For.
+   * Otherwise clients could forge that header and dodge per-IP rate limits.
+   */
+  TRUST_PROXY: booleanFlag('false'),
 });
 
 export type Config = z.infer<typeof envSchema>;
