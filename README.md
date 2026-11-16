@@ -61,6 +61,22 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 
 เทสต์สร้างประเภทห้อง ห้อง และผู้ใช้ของตัวเองแล้วลบเมื่อจบ จึงไม่แตะข้อมูลที่ seed ไว้ เทสต์ที่จำลอง Redis ล่มชี้ไปที่พอร์ต 6399 ซึ่งต้องไม่มีอะไรรันอยู่
 
+### Postman collection
+
+Import ไฟล์ `postman/Ultra-Resort-Booking-Engine.postman_collection.json` เข้า Postman แล้วรันทั้ง collection ด้วย Collection Runner หรือกดทีละ request จากบนลงล่าง ไม่ต้องตั้ง environment
+
+- มี 34 request ใน 8 โฟลเดอร์: Health, Authentication, Rooms, API 2 Pricing, API 1 Booking, API 3 Dashboard, Cancellation และ Rate limiting ทุก request มีสคริปต์ตรวจผลลัพธ์
+- Request แรก (Register) สร้างผู้ใช้ใหม่และสุ่มช่วงวันที่จอง แล้วเก็บ token, `roomId` และ `bookingId` ไว้ใน collection variables ให้ request ถัดไป จึงรันซ้ำได้โดยไม่ต้องแก้ค่า และท้าย collection ยกเลิกการจองที่สร้างไว้
+- ตัวแปร `baseUrl`, `adminEmail` และ `adminPassword` มีค่าเริ่มต้นตรงกับ `docker-compose.yml` ถ้าเปลี่ยนค่าใน `.env` ให้แก้ที่ตัวแปรของ collection
+- โฟลเดอร์ Rate limiting วนยิง login ผิดจนได้ 429 ในครั้งที่ 11 หลังรันแล้วโควตา login ต่อ IP เหลือน้อย ให้รอ 1 นาทีก่อนรันทั้ง collection อีกรอบ
+- Postman ไม่ export WebSocket request ไว้ในไฟล์ collection วิธีทดสอบ WebSocket ของ dashboard อยู่ในคำอธิบายของโฟลเดอร์ "5. API 3 - Booking Dashboard"
+
+รันจาก command line ได้ด้วย newman
+
+```bash
+npx newman run postman/Ultra-Resort-Booking-Engine.postman_collection.json
+```
+
 ## สถานะงาน
 
 | ส่วน | สถานะ |
@@ -73,7 +89,7 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 | API 3: Booking Dashboard (WebSocket) | เสร็จ |
 | Redis rate limiting | เสร็จ |
 | Concurrency test | เสร็จ |
-| Postman collection (`/postman`) | ยังไม่เริ่ม |
+| Postman collection (`/postman`) | เสร็จ |
 
 ## แนวทางแก้ปัญหา
 
@@ -298,6 +314,7 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 | API 2: Pricing | เขียน `src/pricing/*`, `src/bookings/schemas.ts`, `src/db/transaction.ts`, `test/pricing.test.ts` และปรับ `POST /bookings` ลง repo โดยตรง เลือกวิธีปัดเศษ การล็อกประเภทห้อง และนิยาม "การพักที่เสร็จแล้ว" | ตรวจโค้ดและ commit |
 | API 3: Dashboard | เขียน `src/dashboard/*`, `src/bookings/model.ts`, `test/dashboard.test.ts` และปรับ `POST /bookings` กับการยกเลิกให้ส่ง event ลง repo โดยตรง เลือกวิธียืนยันตัวตนของ WebSocket และเนื้อหา snapshot | ตรวจโค้ดและ commit แก้การ subscribe และเทสต์ token หมดอายุด้วยตัวเองตามผลตรวจ |
 | Rate limiting | เขียน `src/rate-limit/*`, `test/rate-limit.test.ts` และต่อเข้ากับ route ลง repo โดยตรง เลือกแบบ fixed window ค่าขีดจำกัด และให้ปล่อยผ่านเมื่อ Redis ล่ม | ตรวจโค้ดและ commit |
+| Postman collection | สร้าง `postman/Ultra-Resort-Booking-Engine.postman_collection.json` พร้อมสคริปต์ตรวจผลในทุก request และตรวจด้วยตัวรันที่เขียนเองกับ API จริง | ตรวจใน Postman และ commit |
 | Concurrency test และเทสต์ที่เหลือ | เขียน `test/concurrency.test.ts`, `test/hub.test.ts`, `test/db.test.ts`, `test/config.test.ts` และเพิ่มกรณีใน `test/bookings.test.ts` กับ `test/dashboard.test.ts` ลง repo โดยตรง แก้ `POST /bookings` ให้ไม่รอ Redis ตอนล่ม | ตรวจโค้ดและ commit |
 | README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |
 
