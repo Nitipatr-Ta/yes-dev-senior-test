@@ -3,6 +3,7 @@ import { Redis } from 'ioredis';
 import pg from 'pg';
 import { registerAuth } from './auth/plugin.js';
 import { authRoutes } from './auth/routes.js';
+import { bookingRoutes } from './bookings/routes.js';
 import type { Config } from './config.js';
 import { registerErrorHandler } from './errors.js';
 
@@ -33,6 +34,7 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
   registerErrorHandler(app);
   await registerAuth(app);
   await app.register(authRoutes);
+  await app.register(bookingRoutes);
 
   app.get('/health', async (_request, reply) => {
     const [database, cache] = await Promise.allSettled([db.query('SELECT 1'), redis.ping()]);

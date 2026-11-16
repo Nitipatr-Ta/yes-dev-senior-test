@@ -51,11 +51,11 @@ DATABASE_URL=postgres://booking:booking_local_dev@localhost:5432/booking REDIS_U
 | โครงโปรเจกต์, Docker Compose, health check | เสร็จ |
 | Database schema และ index สำหรับ date overlap | เสร็จ |
 | Authentication (JWT) และ input validation | เสร็จ |
-| API 1: High-Concurrency Booking | ยังไม่เริ่ม |
+| API 1: High-Concurrency Booking | เสร็จ (ใช้ราคาตั้งต้น รอ API 2) |
 | API 2: Dynamic Pricing Engine | ยังไม่เริ่ม |
 | API 3: Booking Dashboard (WebSocket) | ยังไม่เริ่ม |
 | Redis rate limiting | ยังไม่เริ่ม |
-| Concurrency test | ยังไม่เริ่ม |
+| Concurrency test | มีใน `test/bookings.test.ts` แล้ว ยังไม่มี load test แยก |
 | Postman collection (`/postman`) | ยังไม่เริ่ม |
 
 ## แนวทางแก้ปัญหา
@@ -106,14 +106,44 @@ CONSTRAINT bookings_no_overlap EXCLUDE USING gist (
 
 ข้อจำกัด: role อยู่ใน token จึงมีผลจนกว่า token หมดอายุ ยังไม่มี refresh token และการเพิกถอน token
 
+### API 1: High-Concurrency Booking (ทำแล้ว)
+
+| Endpoint | สิทธิ์ | หน้าที่ |
+|---|---|---|
+| `GET /rooms` | ทุกคน | รายการห้อง ใส่ `?checkIn=&checkOut=` เพื่อดูว่าห้องว่างในช่วงนั้นหรือไม่ |
+| `POST /bookings` | ผู้ใช้ | จองห้องด้วย `roomId`, `checkIn`, `checkOut` (รูปแบบ `YYYY-MM-DD`) |
+| `GET /bookings` | ผู้ใช้ | การจองของตัวเอง |
+| `GET /bookings/:id` | เจ้าของหรือ admin | การจองรายการเดียว |
+| `POST /bookings/:id/cancel` | เจ้าของหรือ admin | ยกเลิกการจอง วันที่กลับมาว่างทันที |
+
+`POST /bookings` กัน Overbooking สองชั้น (`src/bookings/routes.ts`)
+
+1. **Redis distributed lock ต่อห้อง** (`src/redis/lock.ts`) ใช้ `SET NX PX` อายุ 5 วินาที พร้อม token สุ่ม และปลดล็อกด้วย Lua ที่ตรวจ token ก่อนลบ คำขอที่แย่งล็อกไม่ได้ถูกปฏิเสธทันทีด้วย 409 `ROOM_BUSY` และ header `Retry-After: 1` โดยไม่แตะฐานข้อมูลส่วนการจอง ชั้นนี้มีไว้ลดภาระฐานข้อมูล ไม่ได้รับประกันความถูกต้อง
+2. **PostgreSQL exclusion constraint** `bookings_no_overlap` เป็นตัวรับประกันความถูกต้อง โค้ด `INSERT` ตรง ๆ โดยไม่ตรวจห้องว่างก่อน ถ้าช่วงวันทับกับการจองที่ยืนยันแล้ว ฐานข้อมูลตอบ error `23P01` ซึ่ง API แปลงเป็น 409 `ROOM_UNAVAILABLE` จึงไม่มีช่วงเวลาระหว่าง "ตรวจ" กับ "บันทึก" ให้คำขออื่นแทรก
+
+กรณีที่ชั้นแรกใช้ไม่ได้
+
+- Redis ล่ม: API ยังรับจองต่อโดยอาศัย constraint อย่างเดียว และ log คำเตือน
+- ล็อกหมดอายุก่อนคำขอทำเสร็จ: คำขออื่นเข้ามาได้ แต่ constraint ยังกันการจองซ้อน
+
+ข้อแลกเปลี่ยน: ล็อกเป็นระดับห้อง สองคำขอที่จองห้องเดียวกันคนละช่วงวันในเวลาเดียวกัน อาจมีคำขอหนึ่งได้ `ROOM_BUSY` ทั้งที่วันไม่ทับกัน ผู้เรียกต้องลองใหม่
+
+สถานะที่ตอบ
+
+| สถานะ | code | เมื่อใด |
+|---|---|---|
+| 201 | | จองสำเร็จ |
+| 400 | `VALIDATION_ERROR` | วันที่ผิดรูปแบบ วันในอดีต `checkOut` ไม่อยู่หลัง `checkIn` หรือเกินขีดจำกัด |
+| 401 | `UNAUTHORIZED` | ไม่มี token หรือ token ใช้ไม่ได้ |
+| 404 | `ROOM_NOT_FOUND` | ไม่มีห้องนั้น |
+| 409 | `ROOM_UNAVAILABLE` | ช่วงวันทับกับการจองที่ยืนยันแล้ว |
+| 409 | `ROOM_BUSY` | มีคำขอจองห้องเดียวกันกำลังทำงานอยู่ ลองใหม่ได้ |
+
+ราคาตอนนี้คือราคาตั้งต้นคูณจำนวนคืน และ `priceRules` เป็น `[]` จนกว่า API 2 จะเสร็จ
+
+เทสต์ใน `test/bookings.test.ts` ยิง 100 คำขอพร้อมกันในช่วงวันเดียวกันแล้วตรวจว่าสำเร็จ 1 รายการ ยิงคำขอที่ช่วงวันทับกันบางส่วนแล้วตรวจว่าไม่มีคู่ใดทับกันในฐานข้อมูล และยิง `INSERT` พร้อมกันโดยไม่ผ่านล็อกเพื่อยืนยันว่า constraint กันได้เอง
+
 > หัวข้อถัดจากนี้คือการออกแบบที่วางไว้ ยังไม่มีโค้ด จะปรับให้ตรงกับโค้ดจริงเมื่อแต่ละส่วนเสร็จ
-
-### กัน Overbooking
-
-ใช้สองชั้น
-
-1. **Redis distributed lock ต่อห้อง** (`SET NX PX` พร้อม token และปลดล็อกด้วย Lua ที่ตรวจ token) คำขอที่แย่งล็อกไม่ได้จะถูกปฏิเสธทันที ลดภาระที่ฐานข้อมูลเมื่อมีคำขอเข้ามาพร้อมกันจำนวนมาก
-2. **PostgreSQL exclusion constraint** `bookings_no_overlap` ข้างต้น ชั้นนี้เป็นตัวรับประกันความถูกต้อง แม้ Redis lock หมดอายุกลางทางหรือ Redis ล่ม
 
 ### Dynamic Pricing
 
@@ -136,6 +166,8 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 | Peak Hour วัดจากเวลาใด | เวลาที่กดจอง ตามเขตเวลา Asia/Bangkok ตั้งแต่ 20:00 ถึงก่อน 22:00 | โจทย์ระบุว่าคำนวณแบบ real-time และรีสอร์ทอยู่ในไทย |
 | "เคยพักมากกว่า 3 ครั้ง" | การจองที่ check-out ผ่านไปแล้วตั้งแต่ 4 ครั้งขึ้นไป | "มากกว่า 3" ไม่รวม 3 และการจองที่ยังไม่ได้เข้าพักไม่นับเป็นการพัก |
 | หน่วยของ Base Price | 20,000 บาทต่อคืน | เป็นหน่วยราคาห้องพักทั่วไป |
+| ขีดจำกัดการจอง | พักได้ไม่เกิน 30 คืน จองล่วงหน้าได้ไม่เกิน 365 วัน และ check-in ต้องไม่ใช่วันในอดีตตามเขตเวลา Asia/Bangkok | กันการจองที่ผิดปกติและจำกัดขนาดข้อมูล |
+| การยกเลิก | เจ้าของหรือ admin ยกเลิกได้ทุกเมื่อ ไม่มีค่าปรับ | โจทย์ไม่ระบุนโยบายยกเลิก |
 | ช่วงวันที่จอง | `[check_in, check_out)` วัน check-out ของคนหนึ่งเป็นวัน check-in ของอีกคนได้ | ตรงกับการใช้งานจริงของโรงแรม |
 
 ## การใช้ AI
@@ -150,6 +182,7 @@ Rate limit ด้วย Redis แยกตาม IP และผู้ใช้ 
 | โครงโปรเจกต์ | เขียนไฟล์ใน `src/`, `Dockerfile`, `docker-compose.yml`, ไฟล์ตั้งค่า และเทสต์ health check ลง repo โดยตรง | ตรวจไฟล์และ commit |
 | Database schema และ migration | ออกแบบ schema และให้เนื้อหา `migrations/*.sql`, `src/db/migrate.ts` พร้อมคำอธิบาย | พิมพ์โค้ดเองทีละไฟล์ แก้ `src/server.ts` และ `Dockerfile` รัน container ตรวจ log และ commit |
 | Authentication | เขียน `src/auth/*`, `src/errors.ts`, เทสต์ใน `test/auth.test.ts` และแก้ config ลง repo โดยตรง เลือก scrypt และวิธีสร้าง admin จาก env | ตรวจโค้ดและ commit |
+| API 1: Booking | เขียน `src/bookings/*`, `src/redis/lock.ts` และ `test/bookings.test.ts` ลง repo โดยตรง กำหนดขีดจำกัดการจองและให้ API ทำงานต่อเมื่อ Redis ล่ม | ตรวจโค้ดและ commit |
 | README | ร่างและอัปเดตเอกสารฉบับนี้ | ตรวจและแก้เนื้อหา |
 
 ### สิ่งที่ AI ทำผิดและวิธีแก้
